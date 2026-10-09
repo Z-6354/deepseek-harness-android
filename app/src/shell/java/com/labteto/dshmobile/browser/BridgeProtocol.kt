@@ -3,11 +3,13 @@ package com.labteto.dshmobile.browser
 import kotlinx.serialization.json.*
 
 data class BridgeRequest(val id: String, val type: String, val payload: JsonObject)
+data class PageLifecycle(val stage: String, val webElapsedMs: Double, val sequence: Int)
 data class NotificationContent(val title: String, val body: String, val targetUrl: String, val tag: String?)
 
 object BridgeProtocol {
     const val MAX_MESSAGE = 16384
-    fun requiresForeground(type: String): Boolean = type in setOf("requestNotificationPermission", "changeWebsite", "readCredential", "saveCredential")
+    fun requiresForeground(type: String): Boolean = type in setOf("requestNotificationPermission", "changeWebsite", "readCredential", "saveCredential",
+        "privateFiles.open", "privateFiles.lookup", "privateFiles.beginWrite", "privateFiles.openRead")
     fun parse(raw: String): BridgeRequest? {
         if (raw.length > MAX_MESSAGE) return null
         val value = runCatching { Json.parseToJsonElement(raw) as? JsonObject }.getOrNull() ?: return null
@@ -15,10 +17,23 @@ object BridgeProtocol {
         if (version.isString || version.intOrNull != 1) return null
         val id = (value["id"] as? JsonPrimitive)?.takeIf { it.isString }?.content?.takeIf { it.isNotBlank() && it.length <= 128 } ?: return null
         val type = (value["type"] as? JsonPrimitive)?.takeIf { it.isString }?.content ?: return null
-        if (type !in setOf("pageReady", "capabilities", "requestNotificationPermission", "showNotification", "changeWebsite", "readCredential", "saveCredential")) return null
+        if (type !in setOf("pageReady", "pageLifecycle", "capabilities", "requestNotificationPermission", "showNotification", "changeWebsite", "readCredential", "saveCredential") &&
+            !type.matches(Regex("privateFiles\\.(probe|open|lookup|beginWrite|commitWrite|abortWrite|openRead|remove|clearPartition|releasePartition)"))) return null
         val payload = value["payload"] as? JsonObject ?: return null
         if (type == "pageReady" && payload.isNotEmpty()) return null
+        if (type == "pageLifecycle" && lifecycle(payload) == null) return null
         return BridgeRequest(id, type, payload)
+    }
+
+    val lifecycleStages = setOf("factory", "authChecking", "authReady", "listReady", "targetSelected", "historyReady", "loadingPaint", "bodyPaint", "inputReady", "sessionFirstPaint", "syncCaughtUp", "imageShown", "imageFailed", "compatibility")
+    fun lifecycle(payload: JsonObject): PageLifecycle? {
+        if (payload.keys != setOf("schemaVersion", "stage", "webElapsedMs", "sequence")) return null
+        val version = payload["schemaVersion"] as? JsonPrimitive ?: return null
+        if (version.isString || version.intOrNull != 1) return null
+        val stage = (payload["stage"] as? JsonPrimitive)?.takeIf { it.isString }?.content?.takeIf { it in lifecycleStages } ?: return null
+        val elapsed = (payload["webElapsedMs"] as? JsonPrimitive)?.takeIf { !it.isString }?.doubleOrNull?.takeIf { it.isFinite() && it in 0.0..600_000.0 } ?: return null
+        val sequence = (payload["sequence"] as? JsonPrimitive)?.takeIf { !it.isString }?.intOrNull?.takeIf { it in 1..128 } ?: return null
+        return PageLifecycle(stage, elapsed, sequence)
     }
 
     fun credentialPassword(payload: JsonObject): String? {
