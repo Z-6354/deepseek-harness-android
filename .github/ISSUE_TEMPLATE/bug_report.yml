@@ -6,7 +6,7 @@ body:
     attributes:
       value: |
         当前构建是官方网站的 Android 容器，不是旧版 Compose 原生客户端。
-        **不要在此报告安全漏洞。** 见 [SECURITY.md](https://github.com/sorsama/deepseek-harness-mobile/blob/main/docs/SECURITY.md)。
+        **不要在此报告安全漏洞。** 见 [SECURITY.md](https://github.com/Z-6354/deepseek-harness-android/blob/main/docs/SECURITY.md)。
   - type: checkboxes
     id: checks
     attributes:

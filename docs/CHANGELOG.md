@@ -9,10 +9,22 @@
 ### Removed
 
 - Gradle 模块 `:core`、`:mock-harness`、`:conformance`，以及内嵌 xterm 终端资源、抓包工具与过期截图。
-- `docs/plans/` 中迁移期计划/审计；摘要见 [docs/archive/MIGRATION-HISTORY.md](docs/archive/MIGRATION-HISTORY.md)。
+- `docs/plans/` 中迁移期计划/审计；摘要见 [archive/MIGRATION-HISTORY.md](archive/MIGRATION-HISTORY.md)。
+
+### Added
+
+- 浏览器运行时：`BrowserRuntime` / `DocumentEpoch`，以 browserInstance + generation lease 判定存活；热恢复不 `loadUrl`，揭罩需要真实 WebView visual callback。
+- 私有文件桥：`PrivateFileService` / `PrivateFileStore` / `PrivateFileTransfer`，含原生读注册表与清理栅栏。
+- App 内更新：托管源（优先 `dsh.wannian.fun/dsha/update/latest.json`）与 GitHub 源，启动后检查，确认后下载安装。
+- 启动罩加载动画与版本号显示；`StartupTrace` / `RuntimeDiagnostics` 只观察不控制状态机。
+
+### Fixed
+
+- HyperOS / WebView 152：不再于首个 `loadUrl` 前调用 `addDocumentStartJavaScript`（SIGSEGV）。改为首文档 commit 后注册；缺 API 时同 origin 软 reload 一次，带防环门闩（`CompatReloadGate`）。
 
 ### Changed
 
+- 本地构建回退版本号由 0.12.2 改为 0.12.12，与实际发布线一致。
 - Release CI 只跑 `:app:testReleaseUnitTest`；仓库图仅 `include(":app")`。
 - 文档与第三方声明对齐三模块壳（hanui / hanaccount / App），不再把原生协议栈写成现行能力。
 
@@ -675,7 +687,7 @@ was not a gap in this app so much as the absence of a layer: the harness's own
 `--host 0.0.0.0` because doing so "would expose remote code execution to the
 network".
 
-[`dsh-relay`](https://github.com/sorsama/deepseek-harness-relay) is that layer,
+The former `dsh-relay` layer (removed from this fork) was that layer,
 mounted beside the harness rather than inside it, and this release is the client
 half of it. The relay's own notes were blunt that the previous bridge —
 accepting requests from whatever address a paired phone was last seen on — is

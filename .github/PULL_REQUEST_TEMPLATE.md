@@ -1,5 +1,5 @@
 <!--
-感谢贡献。不需要的章节请删。约定见 CONTRIBUTING.md，产品说明见 docs/。
+感谢贡献。不需要的章节请删。约定见 docs/CONTRIBUTING.md，产品说明见 docs/。
 -->
 
 ## 改了什么、为什么

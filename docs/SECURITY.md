@@ -29,6 +29,8 @@ WebView 拒绝 SSL 错误（`SslErrorHandler.cancel`），禁止混合内容，�
 
 上传、下载与工具输出共享已认证 HTTPS origin 的完整操作员权限。对待附件和工具动作应与在电脑浏览器里相同；登录不会沙箱化远端代理。下载仅允许同 origin GET，上限 25 MiB。
 
+App 阶段 A 增加独立的私有文件缓存接口，但当前网页插件未接入它。能力按当前主文档探针启用；存储位于应用 no-backup 私有目录，采用原子元数据指针、不可变数据版本、受限 MIME 和硬配额。读取 token 短时单次使用；remove/clear 会先撤销尚未登记及已打开的读流，并取消同键写事务。进程恢复会清除未引用 blob，保留仍活跃的临时写与读 pin。上传采用有序 ArrayBuffer 帧。`bindingLabel` 仅选择持久分区，不证明账户身份或服务器授权；未来网页 Adapter 必须先完成 AuthSession 与官方附件授权检查。清理以偏好事务 nonce 对应持久安全代际 fence；两种提交间进程退出后仍可重试，清理失败时能力保持不可用。详见 [协议](PROTOCOL.md) 与 [App 阶段 A 计划](plans/2026-10-07-app-stage-a-update-plan.md)。
+
 ## 报告漏洞
 
-请通过 GitHub **Report a vulnerability** 或邮件 **sor@zyphite.com** 私下报告。不要在公开 issue 里贴密码、Cookie、凭据 URL 或私有会话内容。
+请通过本仓 GitHub **Report a vulnerability**（https://github.com/Z-6354/deepseek-harness-android/security/advisories/new）私下报告。不要在公开 issue 里贴密码、Cookie、凭据 URL 或私有会话内容。

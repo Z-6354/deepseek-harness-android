@@ -16,6 +16,7 @@ keystore.properties
 node_modules/
 .kotlin/
 
-# Nested plugin checkouts (own git repos); not part of the App module graph.
-/dsh-local-hanaccount/
-/dsh-mobile-hanui/
+# Nested plugin checkouts under plugins/ (own git repos); not part of the App module graph.
+/plugins/dsh-local-hanaccount/
+/plugins/dsh-mobile-hanui/
+/plugins/dsh-session-cache-sync/

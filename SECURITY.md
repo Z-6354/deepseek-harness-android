@@ -4,10 +4,7 @@
 
 ## 报告漏洞
 
-请勿开公开 issue，任选其一：
-
-- GitHub **[Report a vulnerability](https://github.com/sorsama/deepseek-harness-mobile/security/advisories/new)**
-- 邮件 **sor@zyphite.com**
+请勿开公开 issue，请通过本仓库 GitHub **[Report a vulnerability](https://github.com/Z-6354/deepseek-harness-android/security/advisories/new)** 私下报告。
 
 请说明攻击者能做什么、复现步骤、App 版本、服务器/插件版本，以及网站 HTTPS 地址形态（不要附密码或 Cookie）。
 
