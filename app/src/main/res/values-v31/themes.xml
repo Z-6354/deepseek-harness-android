@@ -1,12 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <style name="Theme.DshMobile" parent="Theme.AppCompat.Light.NoActionBar">
-        <item name="android:windowBackground">@android:color/white</item>
-        <item name="android:statusBarColor">@android:color/white</item>
-        <item name="android:navigationBarColor">@android:color/white</item>
-        <item name="android:windowLightStatusBar">true</item>
-    </style>
-    <!-- System splash: large brand icon only. Loading wait uses the in-app spinner cover. -->
+    <!-- System splash: large centered icon + bottom title branding (API 31+ only). -->
     <style name="Theme.DshMobile.Starting" parent="Theme.SplashScreen">
         <item name="windowSplashScreenBackground">@android:color/white</item>
         <item name="android:windowBackground">@android:color/white</item>
@@ -14,6 +8,7 @@
         <item name="android:navigationBarColor">@android:color/white</item>
         <item name="android:windowLightStatusBar">true</item>
         <item name="windowSplashScreenAnimatedIcon">@drawable/splash_icon</item>
+        <!-- Branding image omitted: some OEM Android 12+ builds crash at process start with it. -->
         <item name="postSplashScreenTheme">@style/Theme.DshMobile</item>
     </style>
 </resources>
