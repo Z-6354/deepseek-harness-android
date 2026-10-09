@@ -95,10 +95,12 @@ class MainActivity : AppCompatActivity() {
     private val cleanupObserverKey = java.util.UUID.randomUUID().toString()
     private var cleanupNonce: String? = null
     private val updateSource by lazy { AppUpdateLocator() }
-    private val updateInstaller by lazy { AppUpdateInstaller(this) }
+    // Application context: the blocking download can outlive this Activity, so it must not pin it.
+    private val updateInstaller by lazy { AppUpdateInstaller(applicationContext) }
     private var updateJob: kotlinx.coroutines.Job? = null
     private var updateDownloadJob: kotlinx.coroutines.Job? = null
     private var updatePrompted = false
+    private var updateChecked = false
     private var pendingUpdateDialog: AppUpdateOffer? = null
     private var pendingInstallOffer: AppUpdateOffer? = null
     private var updateProgressDialog: AlertDialog? = null
@@ -407,7 +409,10 @@ class MainActivity : AppCompatActivity() {
 
     /** Starts in the background while the launch cover is up; dialog waits until the page uncovers. */
     private fun startAutoUpdateCheck() {
-        if (updatePrompted || updateJob?.isActive == true) return
+        // Once per Activity instance: this is called from every Loading/Visual/Restored event, and the GitHub
+        // fallback is unauthenticated (60 requests/hour per IP). A transient failure is retried on the next launch.
+        if (updatePrompted || updateChecked || updateJob?.isActive == true) return
+        updateChecked = true
         android.util.Log.i("DshaUpdate", "check start local=${BuildConfig.VERSION_CODE}/${BuildConfig.VERSION_NAME}")
         updateJob = lifecycleScope.launch {
             try {
@@ -596,9 +601,11 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun reloadWebsite() {
-            if (!loading && site != null && !repository.cleanupPending) {
+            val current = site
+            if (!loading && current != null && !repository.cleanupPending) {
                 AlertDialog.Builder(this@MainActivity).setMessage("重新加载网站首页？未保存的页面改动会丢失。")
-                    .setPositiveButton("重新加载") { _, _ -> createBrowser(site!!) }.setNegativeButton("取消", null).show()
+                    // Re-read at click time: logout/cleanup can clear `site` while this dialog is open.
+                    .setPositiveButton("重新加载") { _, _ -> (site ?: return@setPositiveButton).let(::createBrowser) }.setNegativeButton("取消", null).show()
             }
     }
     private fun logoutLocally() {

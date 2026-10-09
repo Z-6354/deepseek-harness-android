@@ -53,10 +53,13 @@ class SiteRepository(private val context: Context, preferencesName: String = "br
     }
     fun active(): Site? = sites().firstOrNull { it.id == preferences.getString("active", null) }
     val migrated: Boolean get() = preferences.getBoolean("migrated", false)
+    // Also sanitised on read so a value persisted by an older build (which kept ?token=…) is never replayed.
     fun lastDocument(site: Site): String? = preferences.getString("lastDocument", null)
+        ?.let { persistableDocument(it) }
         ?.takeIf { NavigationPolicy.decide(site, it) == Navigation.INTERNAL }
     fun rememberDocument(site: Site, url: String) {
-        if (NavigationPolicy.decide(site, url) == Navigation.INTERNAL) preferences.edit().putString("lastDocument", url).apply()
+        if (NavigationPolicy.decide(site, url) != Navigation.INTERNAL) return
+        persistableDocument(url)?.let { preferences.edit().putString("lastDocument", it).apply() }
     }
     fun clearLastDocument() { preferences.edit().remove("lastDocument").commit() }
 
@@ -123,7 +126,21 @@ class SiteRepository(private val context: Context, preferencesName: String = "br
         check(preferences.edit().putString("notificationToken", token).commit())
         return token
     }
-    private companion object { val cleanupLock = Any() }
+    companion object {
+        private val cleanupLock = Any()
+
+        /**
+         * Only `scheme://authority/path` is ever written to disk: a query or fragment can carry a one-time login
+         * token or other secret, and replaying it on the next cold start would fail (or loop) anyway.
+         */
+        internal fun persistableDocument(url: String): String? {
+            val uri = runCatching { java.net.URI(url) }.getOrNull() ?: return null
+            val scheme = uri.scheme ?: return null
+            val authority = uri.rawAuthority ?: return null
+            if (uri.rawUserInfo != null) return null
+            return "$scheme://$authority${uri.rawPath.orEmpty().ifEmpty { "/" }}"
+        }
+    }
 }
 
 object LegacySiteMigration {

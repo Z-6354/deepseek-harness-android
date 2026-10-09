@@ -60,9 +60,10 @@ class GitHubAppUpdateSource(
             .build()
         client.newCall(request).execute().use { response ->
             if (!response.isSuccessful) return null
-            val body = response.body?.string() ?: return null
-            if (body.length > MAX_META_BYTES) return null
-            return body
+            val source = response.body?.source() ?: return null
+            source.request(MAX_META_BYTES + 1L)
+            if (source.buffer.size > MAX_META_BYTES) return null
+            return source.buffer.readUtf8()
         }
     }
 
