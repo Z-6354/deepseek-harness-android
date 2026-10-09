@@ -83,8 +83,8 @@
 
 | ID | 严重度 | 位置 | 内容 | 为什么不直接改 |
 |---|---|---|---|---|
-| L-01 | **P1** | `dsh-local-hanaccount` `ip.js:118-127,197-210`、`store.js:28-35`、`gate.js:180` | **回环代理失败即放行**：`trustProxy` 默认开且回环永远在白名单。任何从 127.0.0.1 连入且不带 `X-Real-IP`/`X-Forwarded-For` 的代理（frp、`ssh -R`、cloudflared 改写 Host、tailscale serve）都被当作本机操作员，直接获得免登录；未设密码时 `auth/setup` 也会放行，首个访客接管实例。另外 XFF 取第一跳（客户端可控） | 要把代理信任改成显式 opt-in，会改变默认行为和部署方式，需要你定策略 |
-| L-02 | **P1** | 同上 `api.js:232`、`store.js:199-202` | 锁定按 IP 字符串计数，IPv6 /64 内可轮换约 2^64 个地址；`state.lockouts` 无上限、每次失败整文件重写；`scryptSync` 阻塞事件循环，可叠加成 CPU 型 DoS | 要定 IPv6 聚合粒度、全局失败计数与退避、scrypt 异步化，是行为变更 |
+| L-01 | **P1** ✅部分已修 | `dsh-local-hanaccount` `ip.js`、`store.js`、`gate.js` | **回环代理失败即放行**。策略（你已确认）：默认关闭回环免登录，`loopbackOperator:true` 可恢复。已修：回环连接带任何转发头（`X-Forwarded-*`、`X-Real-IP`、`Forwarded`、`Via`、`CF-*` 等）却取不到可信地址时，按"未解析代理客户端"处理（不白名单、共用一个锁定桶、`auth/setup` 拒绝）；XFF 改取最右一跳，与 `X-Real-IP` 同时存在时必须一致。**未修**：不带任何转发头、又伪造 `Host: localhost` 的纯 TCP 隧道（frp tcp、`ssh -R`），在**尚未设置密码**时仍能通过 `auth/setup` 的判断，首个访客可抢先设密码；已设密码后无法免登录，只能走密码登录和锁定。README 已提示"先设密码再开隧道" | 彻底堵住需要给 `auth/setup` 加一次性本地令牌（启动时打印或写入 dataDir），改变首次设置流程，需要你定 |
+| L-02 | **P1** ✅部分已修 | 同上 `api.js`、`store.js`、`password.js` | 策略（你已确认）：只支持 IPv4。已修：远端 IPv6 客户端一律 403（`::1` 与 IPv4 映射地址除外），不再产生锁定桶、访客记录，消除 /64 轮换；`state.lockouts` 上限 2048 条，淘汰时最后才动处于锁定中的条目。**未修**：全局失败计数与退避（IPv4 僵尸网络仍可各自获得 5 次机会）；`scryptSync` 仍同步阻塞事件循环（单次约几十毫秒，每个 IP 最多 5 次，但多 IP 并发可叠加成 CPU 型 DoS） | 全局退避的阈值和 scrypt 异步化（或换 `crypto.scrypt` 加并发上限）是行为变更，需要你定 |
 | L-03 | P2 | `sync-owner.js:27-32,185-192` | **缓存无淘汰且每次 open 上送全部哈希**：`maxSessionEvents/maxSessionBytes` 已定义但从未使用，`touchedAt` 只写不读；20 万事件的会话每次打开约 15 MB+ 请求，超过传输上限后该会话永久同步失败 | 需要协议改动（区间/Merkle 摘要或分级 reset） |
 | L-04 | P2 | `PrivateFileService.kt:81-90` 等 | **锁内磁盘 I/O 可阻塞 UI 线程**：`bindDocument` 在 UI 线程持服务锁调用 `revokeAll`，而后者会等待持注册表锁做 `FileInputStream.read` 的读者，读者又等持全局锁做哈希/fsync 的写者。32 MiB `commitWrite` 期间导航会卡数秒 | 涉及锁层次重构，需要真机复现与压测 |
 | L-05 | P2 | `MainActivity:821,827,699`、`PlatformCredentialStore` | Keystore 与 `commit()` 在主线程；HyperOS/三星 TEE 上可达数百毫秒。回包需回到主线程并保持租约校验 | 改动覆盖桥接回复路径，需要真机验证 |
