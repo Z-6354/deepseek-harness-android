@@ -17,7 +17,7 @@ jobs:
         with:
           distribution: temurin
           java-version: 17
-      - uses: android-actions/setup-android@v3
+      - uses: android-actions/setup-android@v4
         with:
           # The legacy `tools` package is no longer published. Asking for it makes
           # current hosted runners fail before Gradle starts.
