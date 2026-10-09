@@ -172,7 +172,12 @@ class StaticAssetCache(directory: File, private val diagnostic: (String) -> Unit
         }.mapValues { it.value.joinToString(", ") }
         val readStarted = System.nanoTime()
         val bytes = try {
-            body.bytes()
+            // Content-Length is optional (chunked responses), so bound the read itself rather than trusting headers:
+            // body.bytes() would buffer an unbounded body in memory before the size check below could run.
+            val source = body.source()
+            source.request(MAX_BYTES + 1)
+            check(source.buffer.size <= MAX_BYTES) { "Asset exceeds 32 MiB" }
+            source.buffer.readByteArray()
         } finally {
             response.close()
         }

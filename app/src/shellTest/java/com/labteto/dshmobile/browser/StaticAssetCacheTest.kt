@@ -8,8 +8,10 @@ import okhttp3.tls.HandshakeCertificates
 import okhttp3.tls.HeldCertificate
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.ResponseBody.Companion.toResponseBody
+import okio.buffer
 import org.junit.Assert.*
 import org.junit.Test
+import java.io.File
 import java.nio.file.Files
 
 class StaticAssetCacheTest {
@@ -73,6 +75,49 @@ class StaticAssetCacheTest {
         assertFalse(StaticAssetCache.eligible(response("text/javascript", "").newBuilder()
             .request(okhttp3.Request.Builder().url("https://example.test/assets/app.js").build())
             .removeHeader("Cache-Control").build()))
+    }
+
+    @Test fun chunkedBodyWithoutContentLengthIsBoundedAndNeverPublished() {
+        val certificate = HeldCertificate.Builder().addSubjectAlternativeName("localhost").addSubjectAlternativeName("127.0.0.1").build()
+        val serverTls = HandshakeCertificates.Builder().heldCertificate(certificate).build()
+        val clientTls = HandshakeCertificates.Builder().addTrustedCertificate(certificate.certificate).build()
+        val counted = java.util.concurrent.atomic.AtomicLong()
+        val client = OkHttpClient.Builder().sslSocketFactory(clientTls.sslSocketFactory(), clientTls.trustManager)
+            .addInterceptor { chain ->
+                val response = chain.proceed(chain.request())
+                val body = response.body ?: return@addInterceptor response
+                val counting = object : okio.ForwardingSource(body.source()) {
+                    override fun read(sink: okio.Buffer, byteCount: Long): Long =
+                        super.read(sink, byteCount).also { if (it > 0) counted.addAndGet(it) }
+                }
+                response.newBuilder().body(object : okhttp3.ResponseBody() {
+                    override fun contentType() = body.contentType()
+                    override fun contentLength() = body.contentLength()
+                    override fun source() = counting.buffer()
+                }).build()
+            }.build()
+        val server = MockWebServer().apply { useHttps(serverTls.sslSocketFactory(), false); start() }
+        val directory = Files.createTempDirectory("static-assets-chunked").toFile()
+        val site = Site(name = "Test", entryUrl = server.url("/").toString(), staticResourcePrefixes = listOf("/assets/"))
+        val url = server.url("/assets/huge-AbCdEf123.js").toString()
+        val cache = StaticAssetCache(directory, baseClient = client)
+        try {
+            // Chunked => no Content-Length, so eligible() cannot reject it from headers alone.
+            // Far larger than the cap, throttled so the client's read position is observable: an unbounded
+            // body.bytes() keeps pulling until the server finishes, a bounded read stops just past 32 MiB.
+            val total = StaticAssetCache.MAX_BYTES * 3
+            server.enqueue(MockResponse().setHeader("Content-Type", "text/javascript")
+                .setHeader("Cache-Control", "public, max-age=31536000, immutable")
+                .setChunkedBody(okio.Buffer().write(ByteArray(total.toInt())), 64 * 1024))
+            val result = cache.intercept(site, url, emptyMap(), null, { true })
+            assertTrue("oversize chunked asset must fail, was $result", result is StaticAssetCache.Intercept.Failed)
+            assertEquals(502, (result as StaticAssetCache.Intercept.Failed).status)
+            // Bounded read stops just past the cap; the old body.bytes() pulled all 96 MiB before checking.
+            assertTrue("client read ${counted.get()} bytes; must stop near the ${StaticAssetCache.MAX_BYTES} cap",
+                counted.get() in 1..(StaticAssetCache.MAX_BYTES * 3 / 2))
+            val published = File(directory, "store").listFiles().orEmpty().filter { it.isFile }
+            assertTrue("nothing may be published: ${published.map { it.name }}", published.isEmpty())
+        } finally { cache.close(); server.shutdown(); directory.deleteRecursively() }
     }
 
     @Test fun vitePluginBundleWithoutCacheControlReplaysFromDisk() {

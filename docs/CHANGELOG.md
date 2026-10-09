@@ -414,7 +414,7 @@ Reported by @MatunSh (#20, #21, #22, #23) and @ServerDestroyer (#24).
   and caching.
 
 Validation and remaining live coverage for the historical native client were tracked in
-`VALIDATION-0.11.0.md` (removed; see [docs/archive/MIGRATION-HISTORY.md](docs/archive/MIGRATION-HISTORY.md)).
+`VALIDATION-0.11.0.md` (removed; see [archive/MIGRATION-HISTORY.md](archive/MIGRATION-HISTORY.md)).
 
 ## [0.10.1] - 2026-09-14
 

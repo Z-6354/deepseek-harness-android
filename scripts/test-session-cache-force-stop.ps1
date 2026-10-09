@@ -1,6 +1,6 @@
 param(
     [string]$Serial = "127.0.0.1:16384",
-    [string]$Adb = "C:/Users/han/AppData/Local/Android/platform-tools/adb.exe"
+    [string]$Adb = $(if ($env:ADB) { $env:ADB } else { "adb" })
 )
 
 $ErrorActionPreference = "Stop"

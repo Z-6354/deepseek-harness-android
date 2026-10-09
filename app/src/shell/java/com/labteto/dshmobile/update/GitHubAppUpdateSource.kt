@@ -81,7 +81,7 @@ class GitHubAppUpdateSource(
 
         fun defaultClient(): OkHttpClient = OkHttpClient.Builder()
             .followRedirects(true)
-            .followSslRedirects(true)
+            .followSslRedirects(false)
             .connectTimeout(15, TimeUnit.SECONDS)
             .readTimeout(30, TimeUnit.SECONDS)
             .callTimeout(45, TimeUnit.SECONDS)

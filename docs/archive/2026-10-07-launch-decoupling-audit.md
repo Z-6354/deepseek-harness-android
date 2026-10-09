@@ -1,10 +1,10 @@
 # 启动链路解耦审核（2026-10-07）
 
-> 该审核的路由/会话持久化方案已被 [运行时架构计划](2026-10-07-runtime-architecture-plan.md) 取代；保留历史，当前实现不再采用原生 seed、短定时恢复门闩或揭罩后经主页跳转。
+> 该审核的路由/会话持久化方案已被 [运行时架构计划](../plans/2026-10-07-runtime-architecture-plan.md) 取代；保留历史，当前实现不再采用原生 seed、短定时恢复门闩或揭罩后经主页跳转。
 
 **状态**：Accepted（阶段 A/B 已落地：hanui 解耦 pageReady；壳侧 DocumentEpoch + LaunchCover 观察者 + 展示预算）  
 **范围**：Android 壳 `app/src/shell`、网页侧 `pageReady` / 会话恢复门闩（`dsh-mobile-hanui`）  
-**基准**： [2026-10-06-current-baseline.md](./2026-10-06-current-baseline.md)、[../ARCHITECTURE.md](../ARCHITECTURE.md)、[../THREE-MODULE-INTEGRATION.md](../THREE-MODULE-INTEGRATION.md)、[../PROTOCOL.md](../PROTOCOL.md)  
+**基准**： [2026-10-06-current-baseline.md](../plans/2026-10-06-current-baseline.md)、[../ARCHITECTURE.md](../ARCHITECTURE.md)、[../THREE-MODULE-INTEGRATION.md](../THREE-MODULE-INTEGRATION.md)、[../PROTOCOL.md](../PROTOCOL.md)  
 **不改**：DeepSeek Harness 官方源码；不把业务协议搬进 App
 
 ---

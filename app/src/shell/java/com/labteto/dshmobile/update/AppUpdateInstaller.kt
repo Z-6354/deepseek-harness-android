@@ -48,7 +48,7 @@ class AppUpdateInstaller(
         }
         val dir = File(context.cacheDir, "updates").apply { mkdirs() }
         dir.listFiles()?.forEach { runCatching { it.delete() } }
-        val target = File(dir, offer.apkName.ifBlank { "update.apk" }.replace(Regex("[^\\w.\\-]"), "_"))
+        val target = File(dir, safeApkFileName(offer.apkName))
         try {
             download(offer.apkUrl, target, offer.apkBytes, onProgress)
             offer.sha256?.let { expected ->
@@ -215,9 +215,21 @@ class AppUpdateInstaller(
         MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
 
     companion object {
+        /**
+         * The manifest is server-controlled, so the name may not escape `updates/`: `..` and `.` survive the
+         * character filter and would resolve to the parent directory. Always yield a plain `*.apk` leaf.
+         */
+        internal fun safeApkFileName(raw: String): String {
+            val cleaned = raw.substringAfterLast('/').substringAfterLast('\\')
+                .replace(Regex("[^\\w.\\-]"), "_").trim('.')
+            val stem = cleaned.ifBlank { "update" }
+            return if (stem.endsWith(".apk", ignoreCase = true)) stem else "$stem.apk"
+        }
+
+        // followSslRedirects(false): never follow an https -> http downgrade; https -> https still follows.
         fun downloadClient(): OkHttpClient = OkHttpClient.Builder()
             .followRedirects(true)
-            .followSslRedirects(true)
+            .followSslRedirects(false)
             .connectTimeout(20, TimeUnit.SECONDS)
             .readTimeout(120, TimeUnit.SECONDS)
             .callTimeout(180, TimeUnit.SECONDS)
