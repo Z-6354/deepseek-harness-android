@@ -1,0 +1,9 @@
+{
+  "versionName": "0.0.0",
+  "versionCode": 1,
+  "apkUrl": "https://dsh.wannian.fun/dsha/update/placeholder.apk",
+  "apkName": "placeholder.apk",
+  "apkBytes": 0,
+  "sha256": null,
+  "releaseNotes": "尚未发布正式 APK；上传后由 publish-app-update 覆盖本文件。"
+}
