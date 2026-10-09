@@ -29,7 +29,12 @@ import androidx.webkit.JavaScriptReplyProxy
 import androidx.webkit.ScriptHandler
 import androidx.webkit.WebViewFeature
 import com.labteto.dshmobile.browser.*
+import com.labteto.dshmobile.update.AppUpdateInstaller
+import com.labteto.dshmobile.update.AppUpdateLocator
+import com.labteto.dshmobile.update.AppUpdateOffer
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.*
 import kotlin.coroutines.resume
 
@@ -40,10 +45,12 @@ class MainActivity : AppCompatActivity() {
     private lateinit var root: LinearLayout
     private lateinit var frame: FrameLayout
     private lateinit var status: TextView
-    private var browser: WebView? = null
-    private var staticAssets: StaticAssetCache? = null
+    private val runtime by lazy { BrowserRuntime(this, cacheDir,
+        { !isFinishing && !isDestroyed && !repository.cleanupPending }, ::onRuntimeEvent, ::onPlatformRequest) }
+    private val browser get() = runtime.view
     private lateinit var launchCover: FrameLayout
-    private lateinit var launchLogo: ImageView
+    private lateinit var launchSpinner: ImageView
+    private lateinit var launchVersion: TextView
     private lateinit var launchHint: TextView
     private lateinit var settingsCorner: android.view.View
     private var settingsCornerDownX = 0f
@@ -60,40 +67,57 @@ class MainActivity : AppCompatActivity() {
         applyLaunchSurface()
     }
     private val launchDeadline: Runnable = Runnable {
-        launch.onDeadline()
+        // Display budget only — pipeline keeps loading; late pageReady may still uncover.
+        // If a document already committed (login/home under the cover), uncover so the
+        // opaque spinner cannot hide a 200 auth page forever after the IP-gate change.
+        launch.onDisplayBudgetExceeded(hadInternalCommit = runtime.committedUrl != null || runtime.sawInternalCommit)
         applyLaunchSurface()
         if (launch.retryVisible) {
             launchHint.visibility = android.view.View.VISIBLE
             launchHint.text = if (launch.networkError)
                 "无法连接到网站。请检查网络后，长按左上角打开设置并重新加载。"
             else
-                "加载超时。长按左上角打开设置并重新加载。不会自动重建页面。"
+                "加载超时。长按左上角打开设置并重新加载。"
         }
     }
-    private var visualFallback: Runnable? = null
     private var site: Site? = null
-    private val generation get() = launch.generation
-    private val committedUrl get() = launch.committedInternalUrl
+    private val generation get() = runtime.generation
+    private val committedUrl get() = runtime.committedUrl
     private val surfaceReady get() = launch.surfaceReady
     private var restoredState: Bundle? = null
     private var loading = true
     private var download = SafeDownload()
     private var lastNotification = 0L
     private var downloading = false
+    private var downloadJob: kotlinx.coroutines.Job? = null
+    private var downloadOperation = 0L
     @Volatile private var downloadVisibilityEpoch = 0L
-    private var websiteBridge: WebsiteBridge? = null
-    private var compatibilityScript: ScriptHandler? = null
     private val cleanupObserverKey = java.util.UUID.randomUUID().toString()
     private var cleanupNonce: String? = null
+    private val updateSource by lazy { AppUpdateLocator() }
+    private val updateInstaller by lazy { AppUpdateInstaller(this) }
+    private var updateJob: kotlinx.coroutines.Job? = null
+    private var updateDownloadJob: kotlinx.coroutines.Job? = null
+    private var updatePrompted = false
+    private var pendingUpdateDialog: AppUpdateOffer? = null
+    private var pendingInstallOffer: AppUpdateOffer? = null
+    private var updateProgressDialog: AlertDialog? = null
+    private var updateProgressBar: ProgressBar? = null
+    private var updateProgressLabel: TextView? = null
+    private val installPermissionLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+        val offer = pendingInstallOffer ?: return@registerForActivityResult
+        if (updateInstaller.canInstall()) downloadAndInstallUpdate(offer)
+        else status.text = "未授予安装权限，无法更新应用。"
+    }
 
-    private data class Picker(val generation: Long, val callback: ValueCallback<Array<Uri>>, var canceled: Boolean = false)
+    private data class Picker(val lease: DocumentLease, val callback: ValueCallback<Array<Uri>>, var canceled: Boolean = false)
     private var picker: Picker? = null
     private val filePicker = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         val pending = picker ?: return@registerForActivityResult
         picker = null
         if (pending.canceled) return@registerForActivityResult
         val data = result.data
-        val uris = if (result.resultCode == RESULT_OK && pending.generation == generation && data != null &&
+        val uris = if (result.resultCode == RESULT_OK && runtime.owns(pending.lease) && data != null &&
             data.flags and Intent.FLAG_GRANT_READ_URI_PERMISSION != 0) {
             val candidates = (data.clipData?.let { clip -> (0 until clip.itemCount.coerceAtMost(FileSelectionPolicy.MAX_FILES + 1)).map { clip.getItemAt(it).uri } }
                 ?: listOfNotNull(data.data)).distinct()
@@ -102,28 +126,28 @@ class MainActivity : AppCompatActivity() {
         pending.callback.onReceiveValue(uris?.takeIf { it.isNotEmpty() })
     }
 
-    private data class PermissionReply(val generation: Long, val id: String)
+    private data class PermissionReply(val lease: DocumentLease, val id: String)
     private var permissionReply: PermissionReply? = null
     private var siteConfirmation = false
     private val permissionLauncher = registerForActivityResult(ActivityResultContracts.RequestPermission()) {
         val pending = permissionReply ?: return@registerForActivityResult
         permissionReply = null
-        if (!valid(pending.generation) || !WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)) return@registerForActivityResult
-        deliverBridgeReply(pending.generation, BridgeProtocol.reply(pending.id, buildJsonObject { put("granted", notificationGranted()) }))
+        if (!valid(pending.lease) || !WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)) return@registerForActivityResult
+        deliverBridgeReply(pending.lease, BridgeProtocol.reply(pending.id, buildJsonObject { put("granted", notificationGranted()) }))
     }
 
-    private data class DownloadRequest(val generation: Long, val site: Site, val url: String)
+    private data class DownloadRequest(val lease: DocumentLease, val site: Site, val url: String)
     private var pendingDownload: DownloadRequest? = null
     private val destination = registerForActivityResult(ActivityResultContracts.CreateDocument("application/octet-stream")) { uri ->
         val pending = pendingDownload ?: return@registerForActivityResult
         pendingDownload = null
         if (uri == null) return@registerForActivityResult
-        if (!valid(pending.generation) || !FileSelectionPolicy.allowedUri(uri.toString())) { deletePartial(uri); return@registerForActivityResult }
+        if (!valid(pending.lease) || !FileSelectionPolicy.allowedUri(uri.toString())) { deletePartial(uri); return@registerForActivityResult }
         val visibilityEpoch = downloadVisibilityEpoch
         lifecycleScope.launch {
             try {
                 lifecycle.withResumed {
-                    if (visibilityEpoch == downloadVisibilityEpoch && foreground() && valid(pending.generation) && !downloading) beginDownload(pending, uri)
+                    if (visibilityEpoch == downloadVisibilityEpoch && foreground() && valid(pending.lease) && !downloading) beginDownload(pending, uri)
                     else deletePartial(uri)
                 }
             } catch (_: Exception) { deletePartial(uri) }
@@ -131,11 +155,11 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun offerSave(site: Site, url: String, contentDisposition: String?, mime: String?) {
-        val request = DownloadRequest(generation, site, url)
+        val request = DownloadRequest(runtime.lease(), site, url)
         val image = mime?.startsWith("image/") == true || url.startsWith("blob:", true) || url.startsWith("data:", true)
         AlertDialog.Builder(this).setMessage(if (image) "保存此图片？" else "保存此文件？最大 25 MiB。仅浏览器可用的导出方式可能无法使用。")
             .setPositiveButton("保存") { _, _ ->
-                if (foreground() && valid(request.generation) && pendingDownload == null && !downloading) {
+                if (foreground() && valid(request.lease) && pendingDownload == null && !downloading) {
                     pendingDownload = request
                     val filename = URLUtil.guessFileName(url, contentDisposition, mime).replace(Regex("[^\\p{L}\\p{N}._ -]"), "_").take(120).ifBlank { if (image) "image.png" else "download" }
                     try { destination.launch(filename) } catch (_: Exception) { pendingDownload = null; status.text = "系统无法提供保存位置" }
@@ -147,8 +171,9 @@ class MainActivity : AppCompatActivity() {
         val lease = download.newLease() // published before scheduling any cookie/network work
         val visibilityEpoch = downloadVisibilityEpoch
         downloading = true
-        lifecycleScope.launch {
-            fun ownsDownload() = generation == pending.generation && browser != null && downloadVisibilityEpoch == visibilityEpoch
+        val operation = ++downloadOperation
+        downloadJob = lifecycleScope.launch {
+            fun ownsDownload() = operation == downloadOperation && runtime.owns(pending.lease) && downloadVisibilityEpoch == visibilityEpoch
             try {
                 lease.ensureActive(::ownsDownload)
                 contentResolver.openOutputStream(uri, "w")?.use { stream ->
@@ -162,11 +187,11 @@ class MainActivity : AppCompatActivity() {
                             owns = ::ownsDownload, output = stream, lease = lease)
                     }
                 } ?: error("Destination unavailable")
-                if (valid(pending.generation)) status.text = "文件已保存"
+                if (valid(pending.lease)) status.text = "文件已保存"
             } catch (_: Exception) {
                 deletePartial(uri)
-                if (valid(pending.generation)) status.text = "下载不可用。仅支持同源 GET 文件，最大 25 MiB。"
-            } finally { lease.cancel(); downloading = false }
+                if (valid(pending.lease)) status.text = "下载不可用。仅支持同源 GET 文件，最大 25 MiB。"
+            } finally { lease.cancel(); if (operation == downloadOperation) { downloading = false; downloadJob = null } }
         }
     }
 
@@ -189,11 +214,11 @@ class MainActivity : AppCompatActivity() {
               } catch (e) { return ''; }
             })()
         """.trimIndent()
-        val raw = kotlinx.coroutines.suspendCancellableCoroutine<String?> { cont ->
+        val owner = runtime.lease()
+        val raw = awaitDocumentResult({ runtime.owns(owner) }) { done ->
             web.post {
-                web.evaluateJavascript(script) { value ->
-                    if (cont.isActive) cont.resume(value)
-                }
+                if (!runtime.owns(owner)) { done(null); return@post }
+                web.evaluateJavascript(script, done)
             }
         }
         if (raw.isNullOrBlank() || raw == "null" || raw == "\"\"") return null
@@ -206,6 +231,7 @@ class MainActivity : AppCompatActivity() {
         val splash = installSplashScreen()
         restoredState = savedInstanceState
         super.onCreate(savedInstanceState)
+        StartupTrace.mark("activity", "mainOnCreate")
         splash.setKeepOnScreenCondition { launch.keepSplash }
         WindowCompat.setDecorFitsSystemWindows(window, false)
         @Suppress("DEPRECATION")
@@ -217,11 +243,27 @@ class MainActivity : AppCompatActivity() {
         repository = SiteRepository(applicationContext)
         credentialStore = PlatformCredentialStore(applicationContext)
         buildLayout()
-        // Do not drop the system splash here: keepSplash stays true until Ready
-        // so splash and the brand cover read as one loading stage.
-        splash.setOnExitAnimationListener { splashScreenView -> splashScreenView.remove() }
+        title = getString(R.string.app_name)
+        if (Build.VERSION.SDK_INT >= 33) {
+            setTaskDescription(
+                ActivityManager.TaskDescription.Builder()
+                    .setLabel(getString(R.string.app_name))
+                    .build(),
+            )
+        } else {
+            @Suppress("DEPRECATION")
+            setTaskDescription(ActivityManager.TaskDescription(getString(R.string.app_name)))
+        }
+        // Exit system splash; avoid remove()-immediately tricks that race WebView on HyperOS.
+        // iconView can be null on OEM builds without a splash icon drawable.
+        splash.setOnExitAnimationListener { provider ->
+            provider.iconView?.clearAnimation()
+            provider.remove()
+        }
+        launch.releaseSystemSplash()
+        applyLaunchSurface()
         if (BrowserStorage.initializationFailed) {
-            launch.failed(launch.browserId, launch.generation, LaunchFailure.Storage)
+            launch.failed(LaunchFailure.Storage)
             applyLaunchSurface()
             status.text = "无法初始化隔离浏览存储。请重启应用；在此之前无法打开网站。"
             return
@@ -231,7 +273,7 @@ class MainActivity : AppCompatActivity() {
                 val ime = ViewCompat.getRootWindowInsets(root)?.isVisible(WindowInsetsCompat.Type.ime()) == true
                 when {
                     ime -> WindowInsetsControllerCompat(window, root).hide(WindowInsetsCompat.Type.ime())
-                    browser?.canGoBack() == true -> { launch.onGoBack(); browser?.goBack() }
+                    browser?.canGoBack() == true -> { runtime.goBack() }
                     else -> moveTaskToBack(true)
                 }
             }
@@ -246,7 +288,7 @@ class MainActivity : AppCompatActivity() {
         if (repository.migrated) openSite()
         else lifecycleScope.launch {
             try { repository.migrate(); openSite() }
-            catch (_: Exception) { loading = false; launch.failed(launch.browserId, launch.generation, LaunchFailure.Storage); applyLaunchSurface(); status.text = "数据迁移未能完成。请重启应用重试；在此之前无法打开网站。" }
+            catch (_: Exception) { loading = false; launch.failed(LaunchFailure.Storage); applyLaunchSurface(); status.text = "数据迁移未能完成。请重启应用重试；在此之前无法打开网站。" }
         }
     }
 
@@ -259,28 +301,51 @@ class MainActivity : AppCompatActivity() {
                 override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
                 override fun afterTextChanged(s: android.text.Editable?) {
                     val message = s?.toString().orEmpty()
-                    if (message.isNotBlank() && message != site?.name && !message.startsWith("正在加载"))
-                        Toast.makeText(this@MainActivity, message, Toast.LENGTH_LONG).show()
+                    if (message.isBlank() || message == site?.name || message.startsWith("正在加载")) return
+                    // Some OEMs crash with BadTokenException if Toast runs before the window is ready.
+                    if (isFinishing || isDestroyed || !lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)) return
+                    runCatching { Toast.makeText(this@MainActivity, message, Toast.LENGTH_LONG).show() }
                 }
             })
         }
         frame = FrameLayout(this)
         root.addView(frame, LinearLayout.LayoutParams(-1, 0, 1f))
         launchCover = FrameLayout(this).apply { setBackgroundColor(android.graphics.Color.WHITE) }
-        launchLogo = ImageView(this).apply { setImageResource(R.drawable.ic_launcher_foreground) }
-        val size = (288 * resources.displayMetrics.density).toInt()
-        launchCover.addView(launchLogo, FrameLayout.LayoutParams(size, size, android.view.Gravity.CENTER))
+        val density = resources.displayMetrics.density
+        // Phase 2: spinner + version. Phase 1 system splash owns the large brand icon.
+        val spinnerSize = (144 * density).toInt()
+        launchSpinner = ImageView(this).apply {
+            setImageResource(R.drawable.loading_spinner)
+            scaleType = ImageView.ScaleType.FIT_CENTER
+            contentDescription = "正在加载"
+        }
+        launchVersion = TextView(this).apply {
+            text = "v${BuildConfig.VERSION_NAME}"
+            gravity = android.view.Gravity.CENTER
+            setTextColor(0xFF8B8E96.toInt())
+            textSize = 13f
+            setPadding(0, (16 * density).toInt(), 0, 0)
+        }
+        val launchCenter = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = android.view.Gravity.CENTER_HORIZONTAL
+            addView(launchSpinner, LinearLayout.LayoutParams(spinnerSize, spinnerSize))
+            addView(launchVersion, LinearLayout.LayoutParams(-2, -2).apply { gravity = android.view.Gravity.CENTER_HORIZONTAL })
+        }
+        launchCover.addView(
+            launchCenter,
+            FrameLayout.LayoutParams(-2, -2, android.view.Gravity.CENTER),
+        )
         launchHint = TextView(this).apply {
             visibility = android.view.View.GONE
             gravity = android.view.Gravity.CENTER
             setTextColor(0xFF17181C.toInt())
             textSize = 15f
-            setPadding((24 * resources.displayMetrics.density).toInt(), 0, (24 * resources.displayMetrics.density).toInt(), (32 * resources.displayMetrics.density).toInt())
+            setPadding((24 * density).toInt(), 0, (24 * density).toInt(), (32 * density).toInt())
         }
         launchCover.addView(launchHint, FrameLayout.LayoutParams(-1, -2, android.view.Gravity.BOTTOM or android.view.Gravity.CENTER_HORIZONTAL))
         frame.addView(launchCover, FrameLayout.LayoutParams(-1, -1))
         launchCover.setOnLongClickListener { showSettings(); true }
-        val density = resources.displayMetrics.density
         val corner = (44 * density).toInt()
         val cornerInset = (12 * density).toInt()
         settingsCorner = android.view.View(this).apply {
@@ -340,6 +405,196 @@ class MainActivity : AppCompatActivity() {
             }.setNegativeButton("关闭", null).show()
     }
 
+    /** Starts in the background while the launch cover is up; dialog waits until the page uncovers. */
+    private fun startAutoUpdateCheck() {
+        if (updatePrompted || updateJob?.isActive == true) return
+        android.util.Log.i("DshaUpdate", "check start local=${BuildConfig.VERSION_CODE}/${BuildConfig.VERSION_NAME}")
+        updateJob = lifecycleScope.launch {
+            try {
+                // Never block the main thread — concurrent WebView start + main I/O crashes HyperOS Chromium.
+                val offer = withContext(Dispatchers.IO) { updateSource.latest() }
+                if (offer == null) {
+                    android.util.Log.i("DshaUpdate", "no offer")
+                    return@launch
+                }
+                android.util.Log.i("DshaUpdate", "offer=${offer.versionCode}/${offer.versionName} url=${offer.apkUrl}")
+                if (offer.versionCode <= BuildConfig.VERSION_CODE || updatePrompted) {
+                    android.util.Log.i("DshaUpdate", "skip older-or-prompted")
+                    return@launch
+                }
+                // HyperOS/WebView SIGSEGV if AlertDialog opens while Chromium is still starting.
+                if (canShowUpdateUi()) {
+                    showUpdateDialog(offer)
+                } else {
+                    pendingUpdateDialog = offer
+                    android.util.Log.i("DshaUpdate", "pending until page settled")
+                }
+            } catch (error: Exception) {
+                android.util.Log.w("DshaUpdate", "check failed", error)
+            }
+        }
+    }
+
+    private fun canShowUpdateUi(): Boolean =
+        !isFinishing && !isDestroyed &&
+            lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED) &&
+            window?.decorView?.isAttachedToWindow == true &&
+            // Wait until launch cover settles — dialog over mid-load WebView crashes Redmi HyperOS (SIGSEGV in libwebviewchromium).
+            (launch.surfaceReady || launch.surface == LaunchSurface.Failed)
+
+    private fun maybeShowPendingUpdate() {
+        val offer = pendingUpdateDialog ?: return
+        if (updatePrompted || !canShowUpdateUi()) return
+        pendingUpdateDialog = null
+        android.util.Log.i("DshaUpdate", "showing pending dialog")
+        showUpdateDialog(offer)
+    }
+
+    private fun showUpdateDialog(offer: AppUpdateOffer) {
+        if (updatePrompted || isFinishing || isDestroyed) return
+        if (!canShowUpdateUi()) {
+            pendingUpdateDialog = offer
+            return
+        }
+        updatePrompted = true
+        android.util.Log.i("DshaUpdate", "dialog show ${offer.versionName}")
+        runOnUiThread {
+            if (isFinishing || isDestroyed || !canShowUpdateUi()) {
+                updatePrompted = false
+                pendingUpdateDialog = offer
+                return@runOnUiThread
+            }
+            runCatching {
+                val web = browser
+                web?.onPause()
+                AlertDialog.Builder(this)
+                    .setTitle("发现新版本 ${offer.versionName}")
+                    .setMessage("当前 v${BuildConfig.VERSION_NAME}，可更新到 v${offer.versionName}。")
+                    .setPositiveButton("更新") { _, _ ->
+                        web?.onResume()
+                        downloadAndInstallUpdate(offer)
+                    }
+                    .setNegativeButton("关闭") { _, _ -> web?.onResume() }
+                    .setOnCancelListener { web?.onResume() }
+                    .setCancelable(true)
+                    .show()
+            }.onFailure { error ->
+                browser?.onResume()
+                updatePrompted = false
+                pendingUpdateDialog = offer
+                android.util.Log.w("DshaUpdate", "dialog show failed", error)
+            }
+        }
+    }
+
+    private fun downloadAndInstallUpdate(offer: AppUpdateOffer) {
+        if (updateDownloadJob?.isActive == true) return
+        updateDownloadJob = lifecycleScope.launch {
+            showUpdateProgress("正在下载 ${offer.versionName}…", indeterminate = true)
+            when (
+                val prepared = updateInstaller.prepare(offer) { downloaded, total ->
+                    runOnUiThread {
+                        if (total > 0) {
+                            val percent = ((downloaded * 100) / total).toInt().coerceIn(0, 100)
+                            showUpdateProgress("正在下载 ${offer.versionName}… $percent%", percent = percent)
+                        } else {
+                            val mb = downloaded / (1024 * 1024)
+                            showUpdateProgress("正在下载 ${offer.versionName}… ${mb} MB", indeterminate = true)
+                        }
+                    }
+                }
+            ) {
+                is AppUpdateInstaller.PrepareResult.NeedPermission -> {
+                    dismissUpdateProgress()
+                    pendingInstallOffer = offer
+                    status.text = "请允许安装未知应用后继续更新。"
+                    try {
+                        installPermissionLauncher.launch(prepared.settingsIntent)
+                    } catch (_: Exception) {
+                        pendingInstallOffer = null
+                        status.text = "无法打开安装权限设置。"
+                    }
+                }
+                is AppUpdateInstaller.PrepareResult.Failed -> {
+                    dismissUpdateProgress()
+                    status.text = prepared.message
+                    if (canShowUpdateUi()) {
+                        runCatching {
+                            AlertDialog.Builder(this@MainActivity)
+                                .setTitle("更新失败")
+                                .setMessage(prepared.message)
+                                .setPositiveButton("关闭", null)
+                                .show()
+                        }
+                    }
+                }
+                is AppUpdateInstaller.PrepareResult.Ready -> {
+                    showUpdateProgress("正在打开系统安装界面…", indeterminate = true)
+                    try {
+                        startActivity(updateInstaller.installIntent(prepared.uri))
+                        dismissUpdateProgress()
+                        status.text = "请在系统界面确认安装。"
+                    } catch (_: Exception) {
+                        dismissUpdateProgress()
+                        status.text = "无法打开系统安装界面。"
+                    }
+                }
+            }
+        }
+    }
+
+    private fun showUpdateProgress(message: String, percent: Int? = null, indeterminate: Boolean = false) {
+        if (!canShowUpdateUi()) return
+        if (updateProgressDialog == null) {
+            val density = resources.displayMetrics.density
+            val pad = (24 * density).toInt()
+            val label = TextView(this).apply {
+                text = message
+                setPadding(0, 0, 0, (12 * density).toInt())
+            }
+            val bar = ProgressBar(this).apply {
+                max = 100
+                isIndeterminate = true
+            }
+            val box = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(pad, pad, pad, pad)
+                addView(label, LinearLayout.LayoutParams(-1, -2))
+                addView(bar, LinearLayout.LayoutParams(-1, -2))
+            }
+            updateProgressLabel = label
+            updateProgressBar = bar
+            val dialog = AlertDialog.Builder(this)
+                .setTitle("应用更新")
+                .setView(box)
+                .setCancelable(false)
+                .create()
+            val shown = runCatching { dialog.show() }.isSuccess
+            if (!shown) {
+                updateProgressLabel = null
+                updateProgressBar = null
+                return
+            }
+            updateProgressDialog = dialog
+        }
+        updateProgressLabel?.text = message
+        updateProgressBar?.apply {
+            if (indeterminate || percent == null) {
+                isIndeterminate = true
+            } else {
+                isIndeterminate = false
+                progress = percent
+            }
+        }
+    }
+
+    private fun dismissUpdateProgress() {
+        updateProgressDialog?.dismiss()
+        updateProgressDialog = null
+        updateProgressBar = null
+        updateProgressLabel = null
+    }
+
     private fun reloadWebsite() {
             if (!loading && site != null && !repository.cleanupPending) {
                 AlertDialog.Builder(this@MainActivity).setMessage("重新加载网站首页？未保存的页面改动会丢失。")
@@ -387,7 +642,7 @@ class MainActivity : AppCompatActivity() {
                 return@setOnClickListener
             }
             dialog.dismiss()
-            view.loadUrl(raw)
+            runtime.navigate(raw)
         } }
         dialog.show()
     }
@@ -464,222 +719,103 @@ class MainActivity : AppCompatActivity() {
             }.show()
     }
 
-    @Suppress("SetJavaScriptEnabled")
     private fun createBrowser(target: Site) {
-        if (isDestroyed || isFinishing) return
-        if (repository.cleanupPending || BrowserEnvironment.isCleaning) {
-            status.text = "正在清除浏览数据，请稍后再打开网站。"
-            return
-        }
-        if (repository.owner != target.owner) {
-            status.text = "当前浏览环境与目标网站不一致。请长按左上角打开设置，重新加载或清除本地数据。"
-            return
-        }
+        if (isDestroyed || isFinishing || repository.cleanupPending || BrowserEnvironment.isCleaning) return
+        if (repository.owner != target.owner) { status.text = "当前浏览环境与目标网站不一致。请重新加载或清除本地数据。"; return }
         destroyBrowser()
-        launch.onBrowserRecreated()
-        armLaunchDeadline()
+        site = target; siteConfirmation = false
+        val saved = restoredState.also { restoredState = null }
+        val tap = notificationUrl(intent, target)
+        runtime.start(target, if (tap == null) saved else null, tap ?: repository.lastDocument(target) ?: target.entryUrl)
+        runtime.view?.let { frame.addView(it, 0, FrameLayout.LayoutParams(-1, -1)) }
+    }
+
+    private fun onRuntimeEvent(event: BrowserRuntime.Event) {
+        when (event) {
+            BrowserRuntime.Event.Starting -> { launch.onBrowserRecreated() }
+            BrowserRuntime.Event.Loading -> {
+                armLaunchDeadline()
+                startAutoUpdateCheck()
+            }
+            is BrowserRuntime.Event.DocumentStarted -> {
+                retirePlatformTasks()
+                if (!event.back) launch.onDocumentStarted()
+
+            }
+            is BrowserRuntime.Event.Committed -> {
+                site?.let { repository.rememberDocument(it, event.url) }
+                status.text = site?.name.orEmpty() + if (!event.bridgeBound) " · 系统增强已暂停；请重新加载首页以恢复。" else ""
+
+            }
+            is BrowserRuntime.Event.Interactive -> {
+                if (launch.onInteractive()) runtime.requestVisual(event.lease)
+            }
+            is BrowserRuntime.Event.Visual -> {
+                launch.onVisualComplete(launch.browserId)
+                maybeShowPendingUpdate()
+                startAutoUpdateCheck()
+            }
+            is BrowserRuntime.Event.Failure -> { if (!surfaceReady) launch.failed(event.category); status.text = "网站无法加载。请检查地址、证书和网络后重新加载。" }
+            is BrowserRuntime.Event.HttpError -> {
+                // Auth/gate surfaces must uncover even when the body is JSON (403/401/503).
+                if (launch.coverVisible && event.status in setOf(401, 403, 503)) launch.onGateRejected()
+                status.text = "网站返回 HTTP ${event.status}。请确认服务器登录或访问控制。"
+            }
+            BrowserRuntime.Event.RendererGone -> {
+                retirePlatformTasks()
+                if (!surfaceReady) launch.failed(LaunchFailure.Network)
+                status.text = "网页渲染进程已停止。请重新加载首页；此前操作不会自动重放。"
+            }
+            BrowserRuntime.Event.Restored -> {
+                launch.onRestoreWithoutReload()
+                cancelLaunchDeadline()
+                maybeShowPendingUpdate()
+                startAutoUpdateCheck()
+            }
+            BrowserRuntime.Event.CompatibilityUnavailable -> Toast.makeText(this, WebCompatibility.UNAVAILABLE, Toast.LENGTH_LONG).show()
+            BrowserRuntime.Event.BlockedNavigation -> status.text = "已阻止打开该地址"
+        }
         applyLaunchSurface()
-        launchTrace("beginLaunch")
-        site = target
-        siteConfirmation = false
-        staticAssets = StaticAssetCache(java.io.File(StaticAssetCache.root(cacheDir), java.security.MessageDigest.getInstance("SHA-256").digest(target.owner.toByteArray()).joinToString("") { "%02x".format(it) }), diagnostic = { if (BuildConfig.DEBUG) android.util.Log.d("StaticAssetCache", it) })
-        BrowserEnvironment.markCreated()
-        WebView.setWebContentsDebuggingEnabled(BuildConfig.DEBUG)
-        launchTrace("webviewCreateBegin")
-        val view = WebView(this)
-        launchTrace("webviewCreateEnd")
-        browser = view
-        var observedStart = false
-        view.settings.apply {
-            javaScriptEnabled = true; domStorageEnabled = true
-            cacheMode = WebSettings.LOAD_DEFAULT
-            allowFileAccess = false; allowContentAccess = false
-            mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
-            setSupportMultipleWindows(false); javaScriptCanOpenWindowsAutomatically = false
-            mediaPlaybackRequiresUserGesture = true
-        }
-        CookieManager.getInstance().setAcceptThirdPartyCookies(view, false)
-        launchTrace("webviewConfigured")
-        compatibilityScript = runCatching {
-            WebCompatibility.install(view, target, repository.lastSessionId(target))
-        }.getOrNull()
-        if (compatibilityScript == null) Toast.makeText(this, WebCompatibility.UNAVAILABLE, Toast.LENGTH_LONG).show()
-        val assetCache = staticAssets
-        view.webViewClient = object : WebViewClient() {
-            override fun shouldInterceptRequest(web: WebView, request: WebResourceRequest): WebResourceResponse? {
-                if (request.isForMainFrame || request.method != "GET") return null
-                return when (val intercepted = assetCache?.intercept(target, request.url.toString(), request.requestHeaders, CookieManager.getInstance().getCookie(request.url.toString())) {
-                    web === browser && site?.owner == target.owner && !repository.cleanupPending
-                } ?: StaticAssetCache.Intercept.Skip) {
-                    StaticAssetCache.Intercept.Skip -> null
-                    is StaticAssetCache.Intercept.Ready -> WebResourceResponse(intercepted.asset.mime, "UTF-8", 200, "OK", intercepted.asset.headers, intercepted.asset.stream)
-                    is StaticAssetCache.Intercept.Failed -> WebResourceResponse("text/plain", "UTF-8", intercepted.status, intercepted.reason, mapOf("Cache-Control" to "no-store"), ByteArrayInputStream(ByteArray(0)))
-                }
+    }
+
+    private fun onPlatformRequest(request: BrowserRuntime.PlatformRequest) {
+        when (request) {
+            is BrowserRuntime.PlatformRequest.Bridge -> bridge(request.site, request.request, request.lease)
+            is BrowserRuntime.PlatformRequest.External -> openExternal(request.uri)
+            is BrowserRuntime.PlatformRequest.Save -> {
+                if (!foreground() || !valid(request.lease) || pendingDownload != null || downloading) return
+                val allowed = NavigationPolicy.decide(request.site, request.url) == Navigation.INTERNAL ||
+                    (request.mime?.startsWith("image/") == true && (request.url.startsWith("blob:", true) || request.url.startsWith("data:", true)))
+                if (allowed) offerSave(request.site, request.url, request.disposition, request.mime)
+                else status.text = "文件下载仅支持同源 HTTPS GET。图片可长按保存。"
             }
-            override fun shouldOverrideUrlLoading(web: WebView, request: WebResourceRequest): Boolean {
-                if (web !== browser) return true
-                return when (NavigationPolicy.decide(target, request.url.toString())) {
-                    Navigation.INTERNAL -> false
-                    Navigation.EXTERNAL -> { if (request.isForMainFrame && request.hasGesture()) openExternal(request.url); true }
-                    Navigation.BLOCKED -> true
-                }
-            }
-            override fun onPageStarted(web: WebView, url: String?, favicon: Bitmap?) {
-                if (web !== browser) return
-                observedStart = true
-                invalidatePage()
-                bindBridge(web, target, generation)
-                applyLaunchSurface()
-                cancelVisualFallback()
-                launchTrace("documentStarted", url)
-                if (url == null || NavigationPolicy.decide(target, url) != Navigation.INTERNAL) { web.stopLoading(); status.text = "已阻止打开该地址" }
-                else if (launch.coverVisible) status.text = "正在加载 ${target.name}…"
-            }
-            override fun onPageCommitVisible(web: WebView, url: String?) {
-                if (web !== browser) return
-                if (url != null && NavigationPolicy.decide(target, url) == Navigation.INTERNAL) {
-                    launch.onInternalCommit(url)
-                    launchTrace("documentCommitted", url)
-                    repository.rememberDocument(target, url)
-                    applyLaunchSurface()
-                    if (launch.awaitVisual) requestUncover(launch.browserId, generation)
-                    status.text = target.name + if (WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER) && websiteBridge?.isBound(generation) != true)
-                        " · 系统增强已暂停；请重新加载首页以恢复。" else ""
-                } else {
-                    launch.onNonInternalCommit()
-                    applyLaunchSurface()
-                }
-            }
-            override fun onPageFinished(web: WebView, url: String?) {
-                if (web !== browser) return
-                CookieManager.getInstance().flush()
-                if (url != null && NavigationPolicy.decide(target, url) == Navigation.INTERNAL && launch.committedInternalUrl == null) {
-                    launch.onInternalCommit(url)
-                    repository.rememberDocument(target, url)
-                    applyLaunchSurface()
-                    if (launch.awaitVisual) requestUncover(launch.browserId, generation)
-                }
-            }
-            override fun onReceivedSslError(web: WebView, handler: SslErrorHandler, error: SslError) {
-                handler.cancel()
-                if (web !== browser) return
-                if (surfaceReady) { status.text = "证书校验失败，已阻止打开该网站。"; return }
-                launch.failed(launch.browserId, generation, LaunchFailure.Certificate)
-                cancelLaunchDeadline()
-                applyLaunchSurface()
-            }
-            override fun onReceivedError(web: WebView, request: WebResourceRequest, error: WebResourceError) {
-                if (web !== browser || !request.isForMainFrame) return
-                if (surfaceReady) { status.text = "网站无法加载。请检查地址和网络后，长按左上角打开设置并重新加载。"; return }
-                launch.failed(launch.browserId, generation, LaunchFailure.Network)
-                cancelLaunchDeadline()
-                applyLaunchSurface()
-            }
-            override fun onReceivedHttpError(web: WebView, request: WebResourceRequest, response: WebResourceResponse) {
-                if (web !== browser || !request.isForMainFrame) return
-                if (launch.coverVisible && response.statusCode in setOf(401, 403)) {
-                    cancelLaunchDeadline()
-                    cancelVisualFallback()
-                    launch.onGateRejected()
-                    applyLaunchSurface()
-                    status.text = if (response.statusCode == 401)
-                        "网站要求登录。当前页面不会发出就绪信号；请用「打开登录链接」粘贴 dsh web 打印的带 token 地址，或确认服务器已启用密码登录页。"
-                    else
-                        "网站拒绝访问（HTTP 403）。请检查服务器访问控制后重新加载。"
-                    return
-                }
-                if (!launch.coverVisible) status.text = "网站返回 HTTP ${response.statusCode}"
-            }
-            override fun onRenderProcessGone(web: WebView, detail: RenderProcessGoneDetail): Boolean {
-                if (web === browser) { destroyBrowser(); status.text = "网页渲染进程已停止。请重新加载首页；此前操作不会自动重放。" }
-                else runCatching { web.destroy() }
-                return true
-            }
-        }
-        view.webChromeClient = object : WebChromeClient() {
-            override fun onShowFileChooser(web: WebView, callback: ValueCallback<Array<Uri>>, params: FileChooserParams): Boolean {
-                if (!foreground() || web != browser || !valid(generation) || picker != null || params.isCaptureEnabled) { callback.onReceiveValue(null); status.text = "请使用系统文件选择器选择已有文件。不支持直接调用相机拍摄。"; return true }
+            is BrowserRuntime.PlatformRequest.FilePicker -> {
+                val callback = request.callback; val params = request.params
+                if (!foreground() || !valid(request.lease) || picker != null || params.isCaptureEnabled) { callback.onReceiveValue(null); status.text = "请使用系统文件选择器选择已有文件。"; return }
                 val mimeTypes = params.acceptTypes.filter { it.contains('/') && it.length < 128 && it.none(Char::isISOControl) }.toTypedArray()
                 val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType(if (mimeTypes.size == 1) mimeTypes[0] else "*/*")
-                    .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION).putExtra(Intent.EXTRA_ALLOW_MULTIPLE, params.mode == FileChooserParams.MODE_OPEN_MULTIPLE)
+                    .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION).putExtra(Intent.EXTRA_ALLOW_MULTIPLE, params.mode == WebChromeClient.FileChooserParams.MODE_OPEN_MULTIPLE)
                 if (mimeTypes.size > 1) intent.putExtra(Intent.EXTRA_MIME_TYPES, mimeTypes)
-                picker = Picker(generation, callback)
+                picker = Picker(request.lease, callback)
                 try { filePicker.launch(intent) } catch (_: Exception) { picker = null; callback.onReceiveValue(null) }
-                return true
-            }
-            override fun onPermissionRequest(request: PermissionRequest) { request.deny() }
-            override fun onGeolocationPermissionsShowPrompt(origin: String?, callback: GeolocationPermissions.Callback) { callback.invoke(origin, false, false) }
-        }
-        websiteBridge = WebsiteBridge(view, target, { generation }, { committedUrl }) { request, proxy ->
-            if (view === browser) bridge(target, request, proxy)
-        }
-        bindBridge(view, target, generation)
-        view.setDownloadListener { url, _, contentDisposition, mime, _ ->
-            if (view !== browser) return@setDownloadListener
-            if (!foreground() || !valid(generation) || pendingDownload != null || downloading || NavigationPolicy.decide(target, url) != Navigation.INTERNAL) {
-                status.text = "文件下载仅支持同源 HTTPS GET（最大 25 MiB）。图片可长按保存；其它导出请用系统浏览器。"
-                return@setDownloadListener
-            }
-            offerSave(target, url, contentDisposition, mime)
-        }
-        view.setOnLongClickListener {
-            if (view !== browser) return@setOnLongClickListener false
-            val hit = view.hitTestResult
-            val extra = hit.extra
-            val image = hit.type == WebView.HitTestResult.IMAGE_TYPE || hit.type == WebView.HitTestResult.SRC_IMAGE_ANCHOR_TYPE
-            if (!image || extra.isNullOrBlank()) return@setOnLongClickListener false
-            if (!foreground() || pendingDownload != null || downloading) return@setOnLongClickListener true
-            if (NavigationPolicy.decide(target, extra) != Navigation.INTERNAL && !extra.startsWith("blob:", true) && !extra.startsWith("data:", true)) {
-                status.text = "仅支持同源图片保存"
-                return@setOnLongClickListener true
-            }
-            offerSave(target, extra, null, "image/*")
-            true
-        }
-        frame.addView(view, 0, FrameLayout.LayoutParams(-1, -1))
-        val saved = restoredState.also { restoredState = null }
-        val restored = saved?.let { view.restoreState(it) }
-        val tap = notificationUrl(intent, target)
-        view.post {
-            if (browser !== view || isDestroyed || isFinishing || repository.cleanupPending) return@post
-            when {
-                tap != null -> {
-                    launchTrace("loadUrl")
-                    view.loadUrl(tap)
-                }
-                restored != null && restored.size > 0 && view.url?.let { NavigationPolicy.decide(target, it) == Navigation.INTERNAL } == true -> {
-                    if (!observedStart) {
-                        launch.onRestoreWithoutReload()
-                        cancelLaunchDeadline()
-                        bindBridge(view, target, generation)
-                        applyLaunchSurface()
-                        launchTrace("restoreWithoutReload")
-                    }
-                }
-                else -> {
-                    launchTrace("loadUrl")
-                    view.loadUrl(repository.lastDocument(target) ?: target.entryUrl)
-                }
             }
         }
     }
 
-    private fun bridge(target: Site, request: BridgeRequest, @Suppress("UNUSED_PARAMETER") proxy: JavaScriptReplyProxy) {
+    private fun bridge(target: Site, request: BridgeRequest, epoch: DocumentLease) {
         if (isFinishing || isDestroyed || browser == null || repository.cleanupPending) return
-        val epoch = generation
         if (request.type != "pageReady" && !valid(epoch)) return
+        if (request.type.startsWith("privateFiles.")) {
+            runtime.handlePrivateFileRequest(request, epoch, foreground())
+            return
+        }
         fun reply(result: JsonObject? = null, error: String? = null) {
-            if (generation != epoch || isFinishing || isDestroyed || browser == null) return
+            if (!runtime.owns(epoch)) return
             if (!WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)) return
             deliverBridgeReply(epoch, BridgeProtocol.reply(request.id, result, error))
         }
         if (request.type != "pageReady" && BridgeProtocol.requiresForeground(request.type) && !foreground()) { reply(error = "foreground_required"); return }
         when (request.type) {
-            "pageReady" -> {
-                launchTrace("pageReady")
-                if (launch.onPageReady()) requestUncover(launch.browserId, epoch)
-                persistSessionFromWebView(target)
-            }
             "readCredential" -> {
                 if (request.payload.isNotEmpty()) { reply(error = "invalid_payload"); return }
                 val password = credentialStore.read(target.origin)
@@ -716,11 +852,13 @@ class MainActivity : AppCompatActivity() {
                     .setOnDismissListener { if (!accepted) siteConfirmation = false }.show()
             }
             "capabilities" -> reply(buildJsonObject {
+                put("pageLifecycleVersion", 1)
                 put("websiteSwitch", true)
                 put("credentialStorage", true)
                 put("notifications", notificationGranted()); put("notificationPermission", Build.VERSION.SDK_INT >= 33)
                 put("filePicker", true); put("downloads", true); put("mediaCapture", false); put("bridgeVersion", 1)
                 put("downloadModes", buildJsonArray { add("same-origin-get") })
+                runtime.privateFileCapabilities()?.let { put("privateFiles", it) }
             })
             "requestNotificationPermission" -> {
                 if (Build.VERSION.SDK_INT < 33 || notificationGranted()) reply(buildJsonObject { put("granted", notificationGranted()) })
@@ -757,14 +895,9 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun deliverBridgeReply(epoch: Long, json: String) {
-        val view = browser ?: return
-        BridgeReplyDelivery.deliver(view, epoch, { generation }, json) {
-            !isFinishing && !isDestroyed && browser === view && !repository.cleanupPending
-        }
-    }
+    private fun deliverBridgeReply(epoch: DocumentLease, json: String) = runtime.reply(epoch, json)
     private fun notificationGranted() = (Build.VERSION.SDK_INT < 33 || ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) && NotificationManagerCompat.from(this).areNotificationsEnabled()
-    private fun valid(epoch: Long) = !isFinishing && !isDestroyed && browser != null && generation == epoch && committedUrl != null && !repository.cleanupPending
+    private fun valid(lease: DocumentLease) = runtime.owns(lease)
     private fun forwardCornerTouch(event: android.view.MotionEvent) {
         val view = browser ?: return
         val copy = android.view.MotionEvent.obtain(event)
@@ -773,27 +906,27 @@ class MainActivity : AppCompatActivity() {
         copy.recycle()
     }
 
-    private fun requestUncover(capturedBrowserId: Long, epoch: Long) {
-        cancelVisualFallback()
-        val fallback = Runnable {
-            launch.onVisualComplete(capturedBrowserId, epoch)
-            applyLaunchSurface()
-        }
-        visualFallback = fallback
-        browser?.postVisualStateCallback(epoch, object : WebView.VisualStateCallback() {
-            override fun onComplete(requestId: Long) {
-                if (visualFallback === fallback) launchHandler.removeCallbacks(fallback)
-                launch.onVisualComplete(capturedBrowserId, requestId)
-                launchTrace("visualComplete")
-                applyLaunchSurface()
-            }
-        })
-        launchHandler.postDelayed(fallback, 800)
-    }
     private fun applyLaunchSurface() {
         launchCover.visibility = if (launch.coverVisible) android.view.View.VISIBLE else android.view.View.GONE
         settingsCorner.visibility = if (launch.coverVisible) android.view.View.GONE else android.view.View.VISIBLE
-        launchLogo.visibility = if (launch.brandCover) android.view.View.VISIBLE else android.view.View.GONE
+        // Cover settle is the HyperOS-safe moment to present a pending update dialog.
+        if (!launch.coverVisible || launch.surface == LaunchSurface.Failed) maybeShowPendingUpdate()
+        // Spinner + version while the launch cover is up (including slow first-load timeout).
+        val showSpinner = launch.brandCover || launch.lastFailure == LaunchFailure.Timeout
+        if (showSpinner) {
+            launchSpinner.visibility = android.view.View.VISIBLE
+            launchVersion.visibility = android.view.View.VISIBLE
+            launchVersion.text = "v${BuildConfig.VERSION_NAME}"
+            if (launchSpinner.animation == null) {
+                launchSpinner.startAnimation(
+                    android.view.animation.AnimationUtils.loadAnimation(this, R.anim.loading_spinner_anim),
+                )
+            }
+        } else {
+            launchSpinner.clearAnimation()
+            launchSpinner.visibility = android.view.View.GONE
+            launchVersion.visibility = android.view.View.GONE
+        }
         when {
             launch.lastFailure == LaunchFailure.Certificate -> {
                 launchHint.visibility = android.view.View.VISIBLE
@@ -803,13 +936,14 @@ class MainActivity : AppCompatActivity() {
                 launchHint.visibility = android.view.View.VISIBLE
                 launchHint.text = "无法连接到网站。请检查网络后，长按左上角打开设置并重新加载。"
             }
-            launch.retryVisible -> {
+            launch.retryVisible && launch.lastFailure != LaunchFailure.Timeout -> {
                 launchHint.visibility = android.view.View.VISIBLE
-                launchHint.text = "加载超时。长按左上角打开设置并重新加载。不会自动重建页面。"
+                launchHint.text = "加载失败。长按左上角打开设置并重新加载。"
             }
-            launch.slowHint || launch.surface == LaunchSurface.DocumentLoading -> {
+            launch.coverVisible -> {
+                // Phase 2: always show loading copy under the spinner while the cover is up.
                 launchHint.visibility = android.view.View.VISIBLE
-                launchHint.text = if (launch.slowHint) "加载时间较长，请稍候…" else "正在加载…"
+                launchHint.text = "正在加载中"
             }
             else -> {
                 launchHint.text = ""
@@ -821,31 +955,13 @@ class MainActivity : AppCompatActivity() {
     }
     private fun armLaunchDeadline() {
         cancelLaunchDeadline()
-        launchHandler.postDelayed(slowHint, 5_000)
-        launchHandler.postDelayed(launchDeadline, 10_000)
+        // Budget starts at loadUrl. Soft tip near the 5s cold TTFI target; does not stop loading.
+        launchHandler.postDelayed(slowHint, 4_500)
+        launchHandler.postDelayed(launchDeadline, 8_000)
     }
     private fun cancelLaunchDeadline() {
         launchHandler.removeCallbacks(slowHint)
         launchHandler.removeCallbacks(launchDeadline)
-    }
-    private fun cancelVisualFallback() {
-        visualFallback?.let(launchHandler::removeCallbacks)
-        visualFallback = null
-    }
-    private fun launchTrace(event: String, url: String? = null) {
-        if (!BuildConfig.DEBUG) return
-        android.util.Log.i("LaunchTrace", "launchId=${launch.launchId} browserId=${launch.browserId} generation=${launch.generation} event=$event surface=${launch.surface} path=${pathClass(url)}")
-    }
-    private fun pathClass(url: String?): String {
-        if (url.isNullOrEmpty()) return "none"
-        val path = runCatching { Uri.parse(url).path }.getOrNull().orEmpty().ifEmpty { "/" }
-        return when {
-            path == "/" || path == "/index.html" -> "index"
-            path.startsWith("/assets/") -> "asset"
-            path.startsWith("/plugins/") -> "plugin"
-            path.startsWith("/dsh-local-hanaccount/") || path.startsWith("/auth") -> "auth"
-            else -> "other"
-        }
     }
     private fun foreground() = lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)
     private fun readable(uri: Uri): Boolean = FileSelectionPolicy.allowedUri(uri.toString()) &&
@@ -864,68 +980,39 @@ class MainActivity : AppCompatActivity() {
     }
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent); setIntent(intent)
-        site?.let { target -> notificationUrl(intent, target)?.let { url -> if (!repository.cleanupPending) browser?.loadUrl(url) } }
+        site?.let { target -> notificationUrl(intent, target)?.let { url -> if (!repository.cleanupPending) runtime.navigate(url) } }
     }
-    private fun invalidatePage() {
-        launch.onMainFrameStarted()
+    private fun retirePlatformTasks() {
+        downloadOperation++; downloadJob?.cancel(); downloadJob = null; downloading = false
         download.cancel()
         picker?.takeIf { !it.canceled }?.let { it.canceled = true; it.callback.onReceiveValue(null) }
     }
-    private fun destroyBrowser() {
-        download.cancel()
-        picker?.takeIf { !it.canceled }?.let { it.canceled = true; it.callback.onReceiveValue(null) }
-        compatibilityScript?.remove()
-        compatibilityScript = null
-        browser?.let { web -> frame.removeView(web); web.stopLoading(); web.webChromeClient = null; web.destroy() }
-        browser = null
-        staticAssets?.let { runCatching { it.close() } }; staticAssets = null
-        websiteBridge = null
-    }
-    private fun bindBridge(view: WebView, target: Site, capturedEpoch: Long) {
-        if (view === browser && site?.owner == target.owner) websiteBridge?.bind(capturedEpoch)
-    }
+    private fun destroyBrowser() { retirePlatformTasks(); runtime.close() }
     override fun onSaveInstanceState(outState: Bundle) {
         super.onSaveInstanceState(outState)
-        browser?.saveState(outState)
+        runtime.saveState(outState)
     }
     override fun onResume() {
         super.onResume()
-        browser?.onResume()
+        runtime.setForeground(true)
         launch.onResume()
         applyLaunchSurface()
+        maybeShowPendingUpdate()
     }
-    private fun persistSessionFromWebView(target: Site) {
-        val view = browser ?: return
-        if (site?.owner != target.owner) return
-        val script = """
-            (function(){
-              try {
-                var keys = ['dsh-mobile-hanui.last-session', 'dsh.sessions.current'];
-                for (var i = 0; i < keys.length; i++) {
-                  var raw = localStorage.getItem(keys[i]);
-                  if (!raw) continue;
-                  var parsed = JSON.parse(raw);
-                  if (parsed && typeof parsed.sessionId === 'string' && parsed.sessionId) return parsed.sessionId;
-                }
-              } catch (e) {}
-              return '';
-            })()
-        """.trimIndent()
-        view.evaluateJavascript(script) { raw ->
-            if (isFinishing || isDestroyed || site?.owner != target.owner) return@evaluateJavascript
-            val value = raw?.trim()?.removeSurrounding("\"")?.takeIf { it.isNotBlank() && it != "null" } ?: return@evaluateJavascript
-            if (Regex("^[\\w.:-]{1,128}$").matches(value)) repository.rememberSessionId(target, value)
-        }
-    }
-
     override fun onPause() {
-        site?.let(::persistSessionFromWebView)
-        if (browser != null) CookieManager.getInstance().flush()
         downloadVisibilityEpoch++
-        browser?.onPause()
+        runtime.setForeground(false)
         download.cancel()
         super.onPause()
     }
     override fun onStop() { downloadVisibilityEpoch++; download.cancel(); super.onStop() }
-    override fun onDestroy() { launchHandler.removeCallbacksAndMessages(null); BrowserEnvironment.detach(cleanupObserverKey); cleanupNonce = null; destroyBrowser(); super.onDestroy() }
+    override fun onDestroy() {
+        dismissUpdateProgress()
+        updateDownloadJob?.cancel()
+        launchHandler.removeCallbacksAndMessages(null)
+        BrowserEnvironment.detach(cleanupObserverKey)
+        cleanupNonce = null
+        destroyBrowser()
+        super.onDestroy()
+    }
 }

@@ -4,18 +4,16 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class WebCompatibilityTest {
-    @Test fun `session seed script is empty for blank or unsafe ids`() {
-        assertEquals("", WebCompatibility.seedSessionScript(null))
-        assertEquals("", WebCompatibility.seedSessionScript(""))
-        assertEquals("", WebCompatibility.seedSessionScript("bad id with spaces"))
-        assertEquals("", WebCompatibility.seedSessionScript("<script>"))
-    }
-
-    @Test fun `session seed script quotes a safe id for document-start localStorage`() {
-        val script = WebCompatibility.seedSessionScript("sess_abc-1.2:3")
-        assertTrue(script.contains("dsh.sessions.current"))
-        assertTrue(script.contains("dsh-mobile-hanui.last-session"))
-        assertTrue(script.contains("sess_abc-1.2:3"))
-        assertFalse(script.contains("<script>"))
+    @Test fun `platform compatibility contains no website chat seed or storage mirror`() {
+        val source = java.io.File("src/shell/java/com/labteto/dshmobile/browser/WebCompatibility.kt").readText()
+        assertFalse(source.contains("localStorage"))
+        assertFalse(source.contains("sessionId"))
+        assertTrue(source.contains("addDocumentStartJavaScript"))
+        assertTrue(source.contains("API_PROBE"))
+        assertFalse(source.contains("evaluateJavascript"))
+        val activity = java.io.File("src/shell/java/com/labteto/dshmobile/MainActivity.kt").readText()
+        assertFalse(activity.contains("dsh.sessions.current"))
+        assertFalse(activity.contains("dsh-mobile-hanui.last-session"))
+        assertFalse(activity.contains("persistSessionFromWebView"))
     }
 }

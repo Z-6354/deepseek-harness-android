@@ -98,7 +98,7 @@ class BrowserPolicyTest {
         assertNull(BridgeReplyDelivery.scriptForReply("{\"ok\":true}\u0000"))
         val source = java.io.File("src/shell/java/com/labteto/dshmobile/MainActivity.kt").readText()
         assertFalse(source.contains("proxy.postMessage"))
-        assertTrue(source.contains("BridgeReplyDelivery.deliver"))
+        assertTrue(java.io.File("src/shell/java/com/labteto/dshmobile/browser/BrowserRuntime.kt").readText().contains("BridgeReplyDelivery.deliver"))
     }
     @Test fun `credential payload cannot select an origin or accept oversized nonstring passwords`() {
         assertNotNull(BridgeProtocol.parse("""{"version":1,"id":"credential","type":"readCredential","payload":{}}"""))
@@ -128,8 +128,9 @@ class BrowserPolicyTest {
         assertTrue(source.contains("无法连接到网站"))
         assertTrue(source.contains("armLaunchDeadline"))
         assertTrue(source.contains("LaunchCoverState"))
+        assertTrue(source.contains("BrowserRuntime"))
+        assertTrue(source.contains("onDisplayBudgetExceeded"))
         assertFalse(source.contains("slowLaunch"))
-        assertFalse(source.contains("20_000"))
         assertTrue(source.contains("repository.migrated"))
         assertTrue(source.contains("lastDocument"))
         val cache = java.io.File("src/shell/java/com/labteto/dshmobile/browser/StaticAssetCache.kt").readText()

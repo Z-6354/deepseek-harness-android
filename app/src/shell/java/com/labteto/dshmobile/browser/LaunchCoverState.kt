@@ -4,19 +4,14 @@ enum class LaunchSurface { Launch, DocumentLoading, Ready, Failed }
 
 enum class LaunchFailure { Network, Certificate, Timeout, Storage }
 
-/** Launch presentation is separate from document generation used to invalidate callbacks. */
+/**
+ * Launch cover presentation only (observer).
+ * Document generation lives in [DocumentEpoch]; this type must not bump it.
+ */
 class LaunchCoverState {
-    @Volatile var generation = 0L
-        private set
     var launchId = 0L
         private set
     var browserId = 0L
-        private set
-    var pendingPageReady = false
-        private set
-    var committedInternalUrl: String? = null
-        private set
-    var navigatingBack = false
         private set
     var surface = LaunchSurface.Launch
         private set
@@ -31,8 +26,6 @@ class LaunchCoverState {
         private set
     var networkError = false
         private set
-    var sawInternalCommit = false
-        private set
     var failOpened = false
         private set
     var slowHint = false
@@ -45,83 +38,39 @@ class LaunchCoverState {
     fun beginLaunch() {
         launchId++
         browserId++
-        pendingPageReady = false
-        committedInternalUrl = null
         awaitVisual = false
         timeoutArmed = true
         networkError = false
-        sawInternalCommit = false
         failOpened = false
         slowHint = false
         retryVisible = false
         lastFailure = null
         surface = LaunchSurface.Launch
-        // Keep the system splash up with the brand cover so cold start is one
-        // continuous loading stage instead of splash → whale → page.
-        keepSplash = true
+        // Drop system splash (large icon) ASAP so the in-app spinner cover can take over.
+        keepSplash = false
     }
 
     fun onBrowserRecreated() = beginLaunch()
 
-    fun onGoBack() {
-        navigatingBack = true
-    }
-
-    fun documentStarted() {
-        val back = navigatingBack
-        navigatingBack = false
-        generation++
-        pendingPageReady = false
-        committedInternalUrl = null
+    /** Ordinary navigations dim content; the initial launch cover keeps the brand. */
+    fun onDocumentStarted() {
         awaitVisual = false
         networkError = false
-        sawInternalCommit = false
-        if (back) return
         surface = when (surface) {
             LaunchSurface.Launch -> LaunchSurface.Launch
             LaunchSurface.Ready, LaunchSurface.DocumentLoading, LaunchSurface.Failed -> LaunchSurface.DocumentLoading
         }
     }
 
-    fun onMainFrameStarted() = documentStarted()
-
-    fun onInternalCommit(url: String) = documentCommitted(generation, url)
-
-    fun documentCommitted(epoch: Long, url: String) {
-        if (epoch != generation) return
-        committedInternalUrl = url
-        sawInternalCommit = true
-        if (pendingPageReady) {
-            pendingPageReady = false
-            awaitVisual = true
-        }
+    /** @return false when the cover already uncovered via gate rejection. */
+    fun onInteractive(): Boolean {
+        if (failOpened && surface == LaunchSurface.Ready) return false
+        awaitVisual = true
+        return true
     }
 
-    fun onNonInternalCommit() {
-        // Stay covered; only Ready / Failed ends the single loading stage.
-    }
-
-    fun onPageReady(): Boolean = pageReady(generation)
-
-    fun pageReady(epoch: Long): Boolean {
-        if (epoch != generation) return false
-        if (failOpened && surface == LaunchSurface.Ready) {
-            pendingPageReady = false
-            return false
-        }
-        if (committedInternalUrl != null) {
-            pendingPageReady = false
-            awaitVisual = true
-            return true
-        }
-        pendingPageReady = true
-        return false
-    }
-
-    fun onVisualComplete(epoch: Long) = onVisualComplete(browserId, epoch)
-
-    fun onVisualComplete(capturedBrowserId: Long, epoch: Long) {
-        if (capturedBrowserId != browserId || epoch != generation || !awaitVisual) return
+    fun onVisualComplete(capturedBrowserId: Long) {
+        if (capturedBrowserId != browserId || !awaitVisual) return
         awaitVisual = false
         timeoutArmed = false
         networkError = false
@@ -138,12 +87,46 @@ class LaunchCoverState {
         slowHint = true
     }
 
-    fun onDeadline() = failed(browserId, generation, LaunchFailure.Timeout)
+    /**
+     * Display budget exceeded — presentation only. Does not stop the pipeline;
+     * a later [onVisualComplete] (if pageReady already armed [awaitVisual]) or a later
+     * [onInteractive] + [onVisualComplete] may still uncover.
+     *
+     * When the main frame already committed, lift the opaque cover so login/home
+     * under it is usable (pageReady/visual may still be missing after auth-gate 200s).
+     */
+    fun onDisplayBudgetExceeded(hadInternalCommit: Boolean) {
+        if (surface == LaunchSurface.Ready) return
+        timeoutArmed = false
+        keepSplash = false
+        slowHint = false
+        if (hadInternalCommit) {
+            awaitVisual = false
+            networkError = false
+            failOpened = false
+            retryVisible = false
+            lastFailure = null
+            surface = LaunchSurface.Ready
+            return
+        }
+        // Keep awaitVisual when pageReady already requested a frame; clearing it permanently
+        // blocked late VisualStateCallback after a slow interactive.
+        lastFailure = LaunchFailure.Timeout
+        retryVisible = true
+        surface = LaunchSurface.Failed
+        networkError = true
+        failOpened = false
+    }
+
+    fun onDeadline() = onDisplayBudgetExceeded(hadInternalCommit = false)
 
     fun onTimeout() = onDeadline()
 
-    fun failed(capturedBrowserId: Long, epoch: Long, category: LaunchFailure) {
-        if (capturedBrowserId != browserId || epoch != generation) return
+    fun failed(category: LaunchFailure, hadInternalCommit: Boolean = false) {
+        if (category == LaunchFailure.Timeout) {
+            onDisplayBudgetExceeded(hadInternalCommit)
+            return
+        }
         if (surface == LaunchSurface.Ready && category == LaunchFailure.Timeout) return
         timeoutArmed = false
         awaitVisual = false
@@ -152,12 +135,11 @@ class LaunchCoverState {
         retryVisible = true
         slowHint = false
         surface = LaunchSurface.Failed
-        networkError = category == LaunchFailure.Network || (category == LaunchFailure.Timeout && committedInternalUrl == null && !sawInternalCommit)
+        networkError = category == LaunchFailure.Network
         failOpened = false
     }
 
     fun onGateRejected() {
-        pendingPageReady = false
         awaitVisual = false
         timeoutArmed = false
         networkError = false
@@ -170,15 +152,11 @@ class LaunchCoverState {
     }
 
     fun onResume() {
-        if (awaitVisual) {
-            onVisualComplete(browserId, generation)
-            return
-        }
+        // Resuming does not prove a visual frame completed.
         if (surface == LaunchSurface.Ready) keepSplash = false
     }
 
     fun onRestoreWithoutReload() {
-        pendingPageReady = false
         awaitVisual = false
         timeoutArmed = false
         networkError = false

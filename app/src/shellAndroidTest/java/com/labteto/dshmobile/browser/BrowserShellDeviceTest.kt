@@ -54,6 +54,63 @@ class BrowserShellDeviceTest {
         } finally { context.getSharedPreferences(prefsName, Context.MODE_PRIVATE).edit().clear().commit() }
     }
 
+    @Test fun cleanupRecoveryReconcilesPreferencesCommittedBeforeStorageFence() {
+        val prefsName = "browser_test_recovery_fence_${UUID.randomUUID()}"
+        val site = Site(name = "Recovery A", entryUrl = "https://recovery-a.test/")
+        try {
+            val repository = SiteRepository(context, prefsName)
+            repository.save(site)
+            val store = repository.privateFileStore(site.owner)
+            val partition = store.partitionId(PrivateFileStore.NAMESPACE, "a".repeat(64))!!
+            publishForCleanupTest(store, partition, "b".repeat(64), byteArrayOf(7, 8, 9))
+            val nonce = UUID.randomUUID().toString()
+            val epoch = BrowserStorage.suffix ?: "legacy-default"
+            context.getSharedPreferences(prefsName, Context.MODE_PRIVATE).edit()
+                .putBoolean("cleanupPending", true).putString("targetOwner", site.owner)
+                .putString("cleanupNonce", nonce).putString("cleanupEpoch", epoch)
+                .putString("active", site.id).putBoolean("fresh", false).commit()
+
+            val reopened = SiteRepository(context, prefsName)
+            val transaction = reopened.pendingCleanup()!!
+            assertTrue("recovery installs the missing durable fence before deleting", reopened.preparePrivateFileCleanup(transaction))
+            assertFalse(store.isAvailable())
+            assertNull(store.lookup(partition, "b".repeat(64)))
+            assertTrue(reopened.completeCleanup(transaction))
+            assertTrue(store.isAvailable())
+        } finally { context.getSharedPreferences(prefsName, Context.MODE_PRIVATE).edit().clear().commit() }
+    }
+
+    @Test fun cleanupRecoveryReblocksAfterFenceFinishedBeforePreferencesCleared() {
+        val prefsName = "browser_test_recovery_preferences_${UUID.randomUUID()}"
+        val site = Site(name = "Recovery B", entryUrl = "https://recovery-b.test/")
+        try {
+            val repository = SiteRepository(context, prefsName)
+            repository.save(site)
+            val store = repository.privateFileStore(site.owner)
+            val partition = store.partitionId(PrivateFileStore.NAMESPACE, "c".repeat(64))!!
+            publishForCleanupTest(store, partition, "d".repeat(64), byteArrayOf(1, 2, 3))
+            val transaction = repository.beginCleanup(site)
+            assertTrue(repository.preparePrivateFileCleanup(transaction))
+            assertTrue(store.finishCleanup(transaction.nonce)) // Simulate process death before clearing preferences.
+            val finishedEpoch = store.currentEpoch()
+
+            val reopened = SiteRepository(context, prefsName)
+            assertEquals(transaction, reopened.pendingCleanup())
+            assertTrue(reopened.preparePrivateFileCleanup(transaction))
+            assertNotEquals("retry must advance the fence epoch", finishedEpoch, store.currentEpoch())
+            assertTrue(reopened.completeCleanup(transaction))
+            assertFalse(reopened.cleanupPending)
+            assertTrue(store.isAvailable())
+            assertNull(store.lookup(partition, "d".repeat(64)))
+        } finally { context.getSharedPreferences(prefsName, Context.MODE_PRIVATE).edit().clear().commit() }
+    }
+
+    private fun publishForCleanupTest(store: PrivateFileStore, partition: String, key: String, bytes: ByteArray) {
+        val write = store.beginWrite(partition, key, bytes.size.toLong(), "application/octet-stream")!!
+        assertEquals(bytes.size.toLong(), store.append(write, 0, bytes))
+        assertNotNull(store.commit(write))
+    }
+
     @Test fun actualProviderFeatureDeterminesUnsupportedSwitch() {
         instrumentation.runOnMainSync {
             val supported = BrowserEnvironment.canDelete()

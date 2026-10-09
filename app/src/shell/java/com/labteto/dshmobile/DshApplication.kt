@@ -9,15 +9,18 @@ import android.os.Looper
 import androidx.work.WorkManager
 import com.labteto.dshmobile.browser.BrowserSession
 import com.labteto.dshmobile.browser.BrowserStorage
+import com.labteto.dshmobile.browser.StartupTrace
 
 /** No DI graph and no native business connection. */
 class DshApplication : Application() {
     override fun onCreate() {
         super.onCreate()
+        StartupTrace.mark("process", "applicationOnCreate")
         // Storage suffix must precede any WebView/provider use.
         BrowserStorage.initialize(this)
-        // Kick Chromium startup off the UI-critical path; do not wait before creating the real WebView.
-        BrowserSession.warmup(this)
+        // Do not call WebViewCompat.startUpWebView here: on Redmi HyperOS / Android 16 it races the
+        // Activity WebView and SIGSEGVs in libwebviewchromium (fault addr 0x18) during first load.
+        StartupTrace.mark("process", "browserWarmupSkipped")
         // Retire legacy keep-alive / notifications after the first frame opportunity.
         Handler(Looper.getMainLooper()).post { retireLegacyBackgroundWork() }
     }
