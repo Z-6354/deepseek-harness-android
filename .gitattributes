@@ -1,0 +1,13 @@
+* text=auto
+
+# Must stay LF: executed by the Linux CI runner.
+gradlew text eol=lf
+*.sh text eol=lf
+
+# Windows-only launcher.
+*.bat text eol=crlf
+
+*.png binary
+*.jpg binary
+*.webp binary
+*.jar binary
