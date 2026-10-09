@@ -1,0 +1,72 @@
+name: 缺陷报告
+description: 报告 DSH Mobile 当前 WebView 壳的问题
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        当前构建是官方网站的 Android 容器，不是旧版 Compose 原生客户端。
+        **不要在此报告安全漏洞。** 见 [SECURITY.md](https://github.com/sorsama/deepseek-harness-mobile/blob/main/docs/SECURITY.md)。
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: 提交前
+      options:
+        - label: 已搜索现有 issue
+          required: true
+  - type: input
+    id: app-version
+    attributes:
+      label: App 版本
+      placeholder: 例如 0.12.2-debug
+    validations:
+      required: true
+  - type: input
+    id: server
+    attributes:
+      label: 网站与插件
+      description: HTTPS 地址（可打码主机名）、hanaccount / hanui 版本（若知道）
+      placeholder: 例如 https://example.example/ ，hanaccount x.y
+    validations:
+      required: true
+  - type: input
+    id: android
+    attributes:
+      label: Android 与 WebView
+      placeholder: 例如 Android 14，WebView 110，MuMu
+    validations:
+      required: true
+  - type: dropdown
+    id: web-gui
+    attributes:
+      label: 同一网站在系统浏览器里是否正常？
+      options:
+        - 浏览器正常，只有 App 有问题
+        - 浏览器同样有问题
+        - 未对比
+        - 不适用
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: 发生了什么
+      description: 复现步骤、期望结果、发生频率
+    validations:
+      required: true
+  - type: input
+    id: message
+    attributes:
+      label: 界面或 Toast 原文
+  - type: textarea
+    id: logs
+    attributes:
+      label: 日志与截图
+      description: |
+        UI 问题请附图。崩溃可用：
+
+        ```sh
+        adb logcat --pid=$(adb shell pidof -s com.labteto.dshmobile.debug)
+        ```
+
+        请打码密码、Cookie 与会话内容。

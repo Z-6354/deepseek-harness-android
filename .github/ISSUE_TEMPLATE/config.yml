@@ -1,0 +1,12 @@
+# 空白 issue 仍开启：文档、提问以及两种表单套不上的事项。
+blank_issues_enabled: true
+contact_links:
+  - name: 项目主页
+    url: https://dshm.zyphite.com
+    about: 对外介绍页
+  - name: HTTPS 部署
+    url: https://github.com/sorsama/deepseek-harness-mobile/blob/main/harness/README.md
+    about: 反向代理与 password-native-v1 插件，不是旧的明文局域网补丁
+  - name: 安全漏洞
+    url: https://github.com/sorsama/deepseek-harness-mobile/security/policy
+    about: 私下报告至 sor@zyphite.com，不要开公开 issue

@@ -1,0 +1,32 @@
+name: 功能建议
+description: 建议改进当前 WebView 壳或与之配套的插件边界
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        业务能力由官方网页拥有。有说服力的请求通常是「网页已有但壳拦了」或「手机系统能力网页做不到」。
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: 提交前
+      options:
+        - label: 已搜索现有 issue
+          required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: 建议
+      description: 希望怎样、为什么有用
+    validations:
+      required: true
+  - type: dropdown
+    id: scope
+    attributes:
+      label: 主要改哪里
+      options:
+        - 仅 Android 壳
+        - 需要服务器插件 / 官方网页配合
+        - 不确定
+    validations:
+      required: true
