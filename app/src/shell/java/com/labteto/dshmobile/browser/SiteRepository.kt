@@ -20,6 +20,8 @@ class SiteRepository(private val context: Context, preferencesName: String = "br
         !File(context.applicationInfo.dataDir, "app_webview").exists()
 
     suspend fun migrate() {
+        // Retire legacy native chat preferences; webpage plugins own startup intent.
+        if (preferences.contains("lastSessionId")) check(preferences.edit().remove("lastSessionId").commit())
         if (preferences.getBoolean("migrated", false)) return
         // Copy only display/address metadata. Never decrypt or promote a credential.
         if (!preferences.getBoolean("addressesImported", false)) {
@@ -38,6 +40,9 @@ class SiteRepository(private val context: Context, preferencesName: String = "br
     }
 
     fun clearStaticAssets() { StaticAssetCache.clear(context.cacheDir) }
+    fun privateFileStore(ownerOverride: String? = owner): PrivateFileStore = PrivateFileStore(
+        File(context.noBackupFilesDir, "private-cache-v1"), ownerOverride ?: active()?.owner ?: "unclaimed-owner",
+    )
 
     fun sites(): List<Site> = runCatching {
         json.decodeFromString<List<Site>>(preferences.getString("sites", "[]")!!)
@@ -55,14 +60,6 @@ class SiteRepository(private val context: Context, preferencesName: String = "br
     }
     fun clearLastDocument() { preferences.edit().remove("lastDocument").commit() }
 
-    /** Last non-blank session id remembered for cold-start reopen (SPA has no session URL). */
-    fun lastSessionId(site: Site): String? = preferences.getString("lastSessionId", null)
-        ?.takeIf { it.isNotBlank() && owner == site.owner }
-    fun rememberSessionId(site: Site, sessionId: String) {
-        if (sessionId.isBlank() || owner != site.owner) return
-        preferences.edit().putString("lastSessionId", sessionId).apply()
-    }
-    fun clearLastSessionId() { preferences.edit().remove("lastSessionId").commit() }
     fun defaultSite(): Site = sites().firstOrNull { it.entryUrl == "https://dsh.wannian.fun/" }
         ?: Site(name = "dsh.wannian.fun", entryUrl = "https://dsh.wannian.fun/", staticResourcePrefixes = listOf("/assets/", "/plugins/")).also(::save)
     fun select(site: Site) { check(preferences.edit().putString("active", site.id).commit()) }
@@ -79,6 +76,8 @@ class SiteRepository(private val context: Context, preferencesName: String = "br
         check(preferences.edit().putBoolean("cleanupPending", true).putString("targetOwner", transaction.targetOwner)
             .putString("cleanupNonce", transaction.nonce).putString("cleanupEpoch", transaction.storageEpoch)
             .putString("active", target?.id).putBoolean("fresh", false).remove("lastDocument").remove("lastSessionId").commit())
+        // The durable storage fence precedes WebView/task teardown and survives process death.
+        privateFileStore().beginCleanup(transaction.nonce)
         transaction
     }
     fun pendingCleanup(): CleanupTransaction? = synchronized(cleanupLock) {
@@ -88,16 +87,27 @@ class SiteRepository(private val context: Context, preferencesName: String = "br
         }
         CleanupTransaction(nonce, targetOwner, preferences.getString("cleanupEpoch", storageEpoch)!!)
     }
+    fun preparePrivateFileCleanup(transaction: CleanupTransaction): Boolean = synchronized(cleanupLock) {
+        if (pendingCleanup() != transaction) return@synchronized false
+        PrivateCleanupFence(privateFileStore(owner ?: transaction.targetOwner ?: "unclaimed-owner")).prepare(transaction)
+    }
     fun blockForLocalLogout(invalidate: () -> Unit) {
-        beginCleanup(null)
+        val transaction = beginCleanup(null)
         invalidate()
         clearStaticAssets()
+        // WebView browsing-data delete is unavailable; still wipe durable private blobs while
+        // leaving the fence blocked so a later full clear is required before login.
+        privateFileStore().deleteForCleanup(transaction.nonce)
     }
     fun completeCleanup(transaction: CleanupTransaction): Boolean = synchronized(cleanupLock) {
         if (pendingCleanup() != transaction || storageEpoch != transaction.storageEpoch || active()?.owner != transaction.targetOwner) return@synchronized false
-        check(preferences.edit().putString("owner", transaction.targetOwner).remove("targetOwner")
-            .remove("cleanupNonce").remove("cleanupEpoch")
-            .putString("ownerEpoch", storageEpoch).putBoolean("cleanupPending", false).putBoolean("fresh", false).commit())
+        val fence = PrivateCleanupFence(privateFileStore(transaction.targetOwner ?: owner ?: "unclaimed-owner"))
+        // Finish the disk fence before advancing owner / clearing cleanupPending so a crash
+        // cannot leave prefs showing the new owner while the fence is still blocked.
+        if (!fence.finish(transaction)) return@synchronized false
+        if (!preferences.edit().putString("owner", transaction.targetOwner).putString("ownerEpoch", storageEpoch)
+                .putBoolean("fresh", false).remove("targetOwner").remove("cleanupNonce").remove("cleanupEpoch")
+                .putBoolean("cleanupPending", false).commit()) return@synchronized false
         if (ownsInstallationEpoch) BrowserStorage.claimEpoch()
         clearStaticAssets()
         true

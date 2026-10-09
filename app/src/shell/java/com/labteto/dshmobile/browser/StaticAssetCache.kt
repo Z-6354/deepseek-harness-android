@@ -20,7 +20,10 @@ class StaticAssetCache(directory: File, private val diagnostic: (String) -> Unit
     .connectTimeout(5, TimeUnit.SECONDS).readTimeout(30, TimeUnit.SECONDS).callTimeout(45, TimeUnit.SECONDS).build()) {
     private val store = File(directory, "store").also { it.mkdirs() }
     private val network = baseClient.newBuilder().cache(null).followRedirects(false).followSslRedirects(false).build()
-    private val inflight = ConcurrentHashMap<String, CompletableFuture<Result<Stored>>>()
+    private data class InFlight(val taskId: String, val future: CompletableFuture<Result<Stored>>, val startedNs: Long, val consumers: java.util.concurrent.atomic.AtomicInteger = java.util.concurrent.atomic.AtomicInteger(1))
+    private val inflight = ConcurrentHashMap<String, InFlight>()
+    private val diagnosticSalt = java.util.UUID.randomUUID().toString()
+    private val publicationLock = sharedPublicationLock(store.absolutePath)
     data class Asset(val mime: String, val headers: Map<String, String>, val stream: InputStream, val size: Int)
     sealed class Intercept {
         data object Skip : Intercept()
@@ -31,49 +34,68 @@ class StaticAssetCache(directory: File, private val diagnostic: (String) -> Unit
     fun load(site: Site, url: String, headers: Map<String, String>, cookie: String?, owns: () -> Boolean): Asset? =
         (intercept(site, url, headers, cookie, owns) as? Intercept.Ready)?.asset
 
-    fun intercept(site: Site, url: String, headers: Map<String, String>, cookie: String?, owns: () -> Boolean): Intercept {
-        val parsed = url.toHttpUrlOrNull() ?: return Intercept.Skip
-        val entry = site.entryUrl.toHttpUrlOrNull() ?: return Intercept.Skip
-        if (!owns() || url.length > 16384 || parsed.scheme != "https" || parsed.host != entry.host || parsed.port != entry.port ||
-            parsed.username.isNotEmpty() || parsed.password.isNotEmpty() ||
-            site.staticResourcePrefixes.none { it.startsWith("/") && it.endsWith("/") && parsed.encodedPath.startsWith(it) } ||
-            !cacheableUrl(parsed)) return Intercept.Skip
+    fun intercept(site: Site, url: String, headers: Map<String, String>, cookie: String?, owns: () -> Boolean): Intercept =
+        intercept(site, url, headers, cookie, owns, owns)
+
+    fun intercept(site: Site, url: String, headers: Map<String, String>, cookie: String?, producerAllowed: () -> Boolean, consumerAllowed: () -> Boolean): Intercept {
+        val urlHash = MessageDigest.getInstance("SHA-256").digest((diagnosticSalt + url).toByteArray(Charsets.UTF_8)).take(8).joinToString("") { "%02x".format(it) }
+        fun fallback(reason: String): Intercept.Skip { diagnostic("event=defaultFallback reason=$reason urlHash=$urlHash"); return Intercept.Skip }
+        val parsed = url.toHttpUrlOrNull() ?: return fallback("invalid_url")
+        val entry = site.entryUrl.toHttpUrlOrNull() ?: return fallback("invalid_site")
+        if (!producerAllowed()) return fallback("producer_retired_before_adoption")
+        if (!consumerAllowed()) return fallback("consumer_retired_before_adoption")
+        if (url.length > 16384) return fallback("url_too_long")
+        if (parsed.scheme != "https" || parsed.host != entry.host || parsed.port != entry.port || parsed.username.isNotEmpty() || parsed.password.isNotEmpty()) return fallback("origin_rejected")
+        if (site.staticResourcePrefixes.none { it.startsWith("/") && it.endsWith("/") && parsed.encodedPath.startsWith(it) }) return fallback("path_not_cacheable")
+        if (!cacheableUrl(parsed)) return fallback("resource_not_cacheable")
         val key = assetKey(url)
+        val consumerId = java.util.UUID.randomUUID().toString().take(8)
+        val replayStarted = System.nanoTime()
         openLocal(key)?.let { local ->
-            diagnostic("asset length=${url.length} local_hit=true bytes=${local.size}")
+            if (!consumerAllowed()) { local.stream.close(); diagnostic("event=consumerDetach urlHash=$urlHash consumer=$consumerId stage=localHit"); return Intercept.Failed(410, "Asset Unavailable") }
+            diagnostic("event=consumerLocalHit urlHash=$urlHash consumer=$consumerId bytes=${local.size} replayOpenMs=${(System.nanoTime() - replayStarted) / 1_000_000}")
             return Intercept.Ready(local)
         }
-        val created = CompletableFuture<Result<Stored>>()
+        val created = InFlight(java.util.UUID.randomUUID().toString(), CompletableFuture(), System.nanoTime())
         val existing = inflight.putIfAbsent(key, created)
         val future = existing ?: created
         if (existing == null) {
+            diagnostic("event=producerStarted task=${created.taskId} urlHash=$urlHash consumer=$consumerId")
             try {
-                created.complete(runCatching { downloadAndStore(key, url, headers, cookie, owns) })
+                created.future.complete(runCatching { downloadAndStore(key, url, headers, cookie, producerAllowed, created.taskId, urlHash) })
             } catch (error: Throwable) {
-                created.complete(Result.failure(error))
+                created.future.complete(Result.failure(error))
             } finally {
                 inflight.remove(key, created)
             }
+        } else {
+            val consumers = existing.consumers.incrementAndGet()
+            diagnostic("event=consumerJoined task=${existing.taskId} urlHash=$urlHash consumer=$consumerId consumers=$consumers")
         }
-        val result = runCatching { future.get(50, TimeUnit.SECONDS) }.getOrElse {
-            diagnostic("download_error ${it.javaClass.simpleName}")
-            return Intercept.Skip
+        val result = runCatching { future.future.get(50, TimeUnit.SECONDS) }.getOrElse {
+            diagnostic("event=producerFailed task=${future.taskId} urlHash=$urlHash category=${it.javaClass.simpleName}")
+            diagnostic("event=consumerDetach task=${future.taskId} urlHash=$urlHash consumer=$consumerId")
+            return Intercept.Failed(502, "Asset Unavailable")
+        }
+        if (!consumerAllowed()) {
+            diagnostic("event=consumerDetach task=${future.taskId} urlHash=$urlHash consumer=$consumerId")
+            return Intercept.Failed(410, "Asset Unavailable")
         }
         return result.fold(
             onSuccess = { stored ->
-                diagnostic("asset length=${url.length} local_hit=false bytes=${stored.size}")
+                diagnostic("event=consumerDelivered task=${future.taskId} urlHash=$urlHash consumer=$consumerId bytes=${stored.size} taskMs=${(System.nanoTime() - future.startedNs) / 1_000_000}")
                 Intercept.Ready(stored.toAsset())
             },
             onFailure = { error ->
                 when (error) {
                     is AlreadyStored -> openLocal(key)?.also {
-                        diagnostic("asset length=${url.length} local_hit=true bytes=${it.size}")
+                        diagnostic("event=consumerLocalHit task=${future.taskId} urlHash=$urlHash consumer=$consumerId bytes=${it.size}")
                     }?.let { Intercept.Ready(it) } ?: Intercept.Failed(502, "Asset Unavailable")
                     is IneligibleAsset -> Intercept.Failed(502, "Asset Unavailable")
-                    is OwnershipLost -> Intercept.Skip
+                    is OwnershipLost -> { diagnostic("event=ownershipLost task=${future.taskId} urlHash=$urlHash"); Intercept.Failed(410, "Asset Unavailable") }
                     else -> {
-                        diagnostic("download_error ${error.javaClass.simpleName}")
-                        Intercept.Skip
+                        diagnostic("event=producerFailed task=${future.taskId} urlHash=$urlHash category=${error.javaClass.simpleName}")
+                        Intercept.Failed(502, "Asset Unavailable")
                     }
                 }
             },
@@ -93,14 +115,15 @@ class StaticAssetCache(directory: File, private val diagnostic: (String) -> Unit
     private class OwnershipLost : Exception()
     private class AlreadyStored : Exception()
 
-    private fun downloadAndStore(key: String, url: String, headers: Map<String, String>, cookie: String?, owns: () -> Boolean): Stored {
+    private fun downloadAndStore(key: String, url: String, headers: Map<String, String>, cookie: String?, producerAllowed: () -> Boolean, taskId: String, urlHash: String): Stored {
         if (localPresent(key)) throw AlreadyStored()
         val builder = Request.Builder().url(url).get()
         headers.filterKeys { it.equals("User-Agent", true) || it.equals("Accept", true) }.forEach { (keyName, value) -> builder.header(keyName, value) }
         if (!cookie.isNullOrBlank()) builder.header("Cookie", cookie)
+        val networkStarted = System.nanoTime()
         val response = network.newCall(builder.build()).execute()
-        diagnostic("asset length=${url.length} network_status=${response.code}")
-        if (!owns()) {
+        diagnostic("event=networkHeaders task=$taskId urlHash=$urlHash status=${response.code} durationMs=${(System.nanoTime() - networkStarted) / 1_000_000}")
+        if (!producerAllowed()) {
             response.close()
             throw OwnershipLost()
         }
@@ -108,7 +131,8 @@ class StaticAssetCache(directory: File, private val diagnostic: (String) -> Unit
             response.close()
             throw IneligibleAsset()
         }
-        return storeResponse(key, response)
+        diagnostic("event=headers task=$taskId urlHash=$urlHash status=${response.code}")
+        return storeResponse(key, response, producerAllowed, taskId, urlHash)
     }
 
     private fun localPresent(key: String): Boolean {
@@ -140,22 +164,27 @@ class StaticAssetCache(directory: File, private val diagnostic: (String) -> Unit
         }.getOrNull()
     }
 
-    private fun storeResponse(key: String, response: Response): Stored {
+    private fun storeResponse(key: String, response: Response, producerAllowed: () -> Boolean, taskId: String, urlHash: String): Stored {
         val body = response.body!!
         val mime = response.header("Content-Type")!!.substringBefore(';').trim()
         val responseHeaders = response.headers.toMultimap().filterKeys {
             !it.equals("Content-Encoding", true) && !it.equals("Content-Length", true) && !it.equals("Set-Cookie", true)
         }.mapValues { it.value.joinToString(", ") }
+        val readStarted = System.nanoTime()
         val bytes = try {
             body.bytes()
         } finally {
             response.close()
         }
+        diagnostic("event=bodyRead task=$taskId urlHash=$urlHash bytes=${bytes.size} durationMs=${(System.nanoTime() - readStarted) / 1_000_000}")
         check(bytes.size.toLong() <= MAX_BYTES) { "Asset exceeds 32 MiB" }
-        val tmpMeta = File(store, "$key.meta.tmp")
-        val tmpBody = File(store, "$key.bin.tmp")
+        if (!producerAllowed()) throw OwnershipLost()
+        val tempId = java.util.UUID.randomUUID().toString().replace("-", "")
+        val tmpMeta = File(store, "$key.$tempId.meta.tmp")
+        val tmpBody = File(store, "$key.$tempId.bin.tmp")
         val meta = File(store, "$key.meta")
         val bin = File(store, "$key.bin")
+        val writeStarted = System.nanoTime()
         tmpBody.outputStream().use { out -> out.write(bytes); out.fd.sync() }
         tmpMeta.writeText(buildString {
             append(mime)
@@ -163,24 +192,32 @@ class StaticAssetCache(directory: File, private val diagnostic: (String) -> Unit
                 append('\n').append(name).append(':').append(value)
             }
         }, Charsets.UTF_8)
-        // Drop published meta first so a crash cannot pair a new body with stale meta.
-        if (meta.exists()) check(meta.delete())
-        if (bin.exists()) check(bin.delete())
-        check(tmpBody.renameTo(bin) || (bin.delete() && tmpBody.renameTo(bin)))
-        check(tmpMeta.renameTo(meta) || (meta.delete() && tmpMeta.renameTo(meta)))
-        diagnostic("asset_bytes=${bytes.size} local_store=true")
+        synchronized(publicationLock) {
+            if (!producerAllowed()) { tmpMeta.delete(); tmpBody.delete(); throw OwnershipLost() }
+            // Same-owner duplicate runtimes share this publication lock. Fingerprinted URL content is immutable.
+            if (localPresent(key)) { tmpMeta.delete(); tmpBody.delete(); return Stored(mime, responseHeaders, bytes) }
+            // Drop published meta first so a crash cannot pair a new body with stale meta.
+            if (meta.exists()) check(meta.delete())
+            if (bin.exists()) check(bin.delete())
+            check(tmpBody.renameTo(bin) || (bin.delete() && tmpBody.renameTo(bin)))
+            check(tmpMeta.renameTo(meta) || (meta.delete() && tmpMeta.renameTo(meta)))
+        }
+        diagnostic("event=diskPublish task=$taskId urlHash=$urlHash bytes=${bytes.size} diskWriteMs=${(System.nanoTime() - writeStarted) / 1_000_000}")
         return Stored(mime, responseHeaders, bytes)
     }
 
     fun close() {
         network.dispatcher.cancelAll()
-        inflight.values.forEach { it.cancel(true) }
+        inflight.values.forEach { diagnostic("event=cancelReason task=${it.taskId} reason=cache_closed elapsedMs=${(System.nanoTime() - it.startedNs) / 1_000_000}") }
+        inflight.values.forEach { it.future.cancel(true) }
         inflight.clear()
     }
 
     companion object {
         const val ROOT = "immutable_assets"
         const val MAX_BYTES = 32L * 1024 * 1024
+        private val publicationLocks = ConcurrentHashMap<String, Any>()
+        private fun sharedPublicationLock(path: String) = publicationLocks.computeIfAbsent(path) { Any() }
         fun root(cacheDir: File) = File(cacheDir, ROOT)
         fun clear(cacheDir: File) { root(cacheDir).deleteRecursively() }
         fun assetKey(url: String): String =

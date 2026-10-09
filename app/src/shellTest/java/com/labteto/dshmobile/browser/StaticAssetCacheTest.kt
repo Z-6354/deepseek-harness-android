@@ -152,6 +152,59 @@ class StaticAssetCacheTest {
         } finally { cache.close(); server.shutdown(); directory.deleteRecursively() }
     }
 
+    @Test fun retiredConsumerDoesNotCancelSameSiteProducerOrTriggerFallbackRequest() {
+        val certificate = HeldCertificate.Builder().addSubjectAlternativeName("localhost").addSubjectAlternativeName("127.0.0.1").build()
+        val serverTls = HandshakeCertificates.Builder().heldCertificate(certificate).build()
+        val clientTls = HandshakeCertificates.Builder().addTrustedCertificate(certificate.certificate).build()
+        val client = OkHttpClient.Builder().sslSocketFactory(clientTls.sslSocketFactory(), clientTls.trustManager).build()
+        val server = MockWebServer().apply { useHttps(serverTls.sslSocketFactory(), false); start() }
+        val directory = Files.createTempDirectory("static-assets-detached-consumer").toFile()
+        val site = Site(name = "Test", entryUrl = server.url("/").toString(), staticResourcePrefixes = listOf("/assets/", "/plugins/"))
+        val url = server.url("/plugins/").newBuilder().encodedQuery("?a.js&rev=lease1").build().toString()
+        val cache = StaticAssetCache(directory, baseClient = client)
+        val consumerActive = java.util.concurrent.atomic.AtomicBoolean(true)
+        try {
+            server.enqueue(MockResponse().setHeadersDelay(100, java.util.concurrent.TimeUnit.MILLISECONDS)
+                .setHeader("Content-Type", "text/javascript").setHeader("Vary", "Accept-Encoding").setBody("export default 'cached';"))
+            val request = java.util.concurrent.CompletableFuture.supplyAsync {
+                cache.intercept(site, url, emptyMap(), null, producerAllowed = { true }, consumerAllowed = { consumerActive.get() })
+            }
+            server.takeRequest()
+            consumerActive.set(false)
+            assertTrue(request.get() is StaticAssetCache.Intercept.Failed)
+            assertEquals(1, server.requestCount)
+            consumerActive.set(true)
+            val laterConsumer = cache.intercept(site, url, emptyMap(), null, producerAllowed = { true }, consumerAllowed = { true })
+            assertTrue(laterConsumer is StaticAssetCache.Intercept.Ready)
+            assertEquals(1, server.requestCount)
+        } finally { cache.close(); server.shutdown(); directory.deleteRecursively() }
+    }
+
+    @Test fun producerRetirementAfterAdoptionFailsLocallyAndDoesNotPublish() {
+        val certificate = HeldCertificate.Builder().addSubjectAlternativeName("localhost").addSubjectAlternativeName("127.0.0.1").build()
+        val serverTls = HandshakeCertificates.Builder().heldCertificate(certificate).build()
+        val clientTls = HandshakeCertificates.Builder().addTrustedCertificate(certificate.certificate).build()
+        val client = OkHttpClient.Builder().sslSocketFactory(clientTls.sslSocketFactory(), clientTls.trustManager).build()
+        val server = MockWebServer().apply { useHttps(serverTls.sslSocketFactory(), false); start() }
+        val directory = Files.createTempDirectory("static-assets-retired-producer").toFile()
+        val site = Site(name = "Test", entryUrl = server.url("/").toString(), staticResourcePrefixes = listOf("/assets/", "/plugins/"))
+        val url = server.url("/plugins/").newBuilder().encodedQuery("?a.js&rev=producer1").build().toString()
+        val cache = StaticAssetCache(directory, baseClient = client)
+        val producerActive = java.util.concurrent.atomic.AtomicBoolean(true)
+        try {
+            server.enqueue(MockResponse().setHeadersDelay(100, java.util.concurrent.TimeUnit.MILLISECONDS)
+                .setHeader("Content-Type", "text/javascript").setHeader("Vary", "Accept-Encoding").setBody("export default 'must-not-publish';"))
+            val request = java.util.concurrent.CompletableFuture.supplyAsync {
+                cache.intercept(site, url, emptyMap(), null, producerAllowed = { producerActive.get() }, consumerAllowed = { true })
+            }
+            server.takeRequest()
+            producerActive.set(false)
+            assertTrue(request.get() is StaticAssetCache.Intercept.Failed)
+            assertEquals(1, server.requestCount)
+            assertFalse(java.io.File(directory, "store").listFiles()?.any { it.name.endsWith(".meta") || it.name.endsWith(".bin") } == true)
+        } finally { cache.close(); server.shutdown(); directory.deleteRecursively() }
+    }
+
     @Test fun localHitStreamsFromDiskWithContentLength() {
         val certificate = HeldCertificate.Builder().addSubjectAlternativeName("localhost").addSubjectAlternativeName("127.0.0.1").build()
         val serverTls = HandshakeCertificates.Builder().heldCertificate(certificate).build()
