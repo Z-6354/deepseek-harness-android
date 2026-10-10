@@ -68,6 +68,22 @@ App 在加载阶段后台自动检查（无设置入口），有新版本则在�
 
 安装前会校验 HTTPS、可选 SHA-256，以及 APK 签名与当前已装包一致。
 
+## Release signing
+
+Release APKs are signed with a dedicated key that lives **outside the repository**. The earlier 0.12.x
+builds were signed with the public Android debug key, so the first build signed with the new key cannot
+be installed over them: users uninstall once and reinstall (app data is cleared; they log in again).
+After that every update installs normally.
+
+1. Create the key once: `.\scripts\new-release-keystore.ps1` (writes `%USERPROFILE%\.dsha-release\`).
+   **Back that folder up.** Losing it means another uninstall for every user.
+2. Local build: load the four `DSH_*` lines from `release.env.txt` into the environment, then
+   `./gradlew :app:assembleRelease`. Without them the task fails on purpose.
+3. CI build (optional): add repository secrets `RELEASE_KEYSTORE` (base64 of the `.keystore`),
+   `RELEASE_KEYSTORE_PASSWORD`, `RELEASE_KEY_ALIAS`, `RELEASE_KEY_PASSWORD`. The workflow refuses to run
+   without `RELEASE_KEYSTORE`. Artifacts are kept 7 days and never published as a GitHub Release.
+4. Publish with `scripts/publish-app-update.ps1`. The app verifies that an update has the same signing
+   certificate as the installed copy.
 ## 同步自制插件到服务器
 
 插件源码在本仓 `plugins/`。覆盖运行时模块后重启 `dsh-web`：

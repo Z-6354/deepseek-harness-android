@@ -50,25 +50,27 @@ android {
         }
     }
 
-    // Optional release signing: provide DSH_KEYSTORE / DSH_KEYSTORE_PASSWORD /
-    // DSH_KEY_ALIAS / DSH_KEY_PASSWORD (env vars, e.g. from GitHub secrets).
-    // Signing activates only when the keystore file actually exists, so a
-    // missing keystore silently falls back to an unsigned release APK.
-    signingConfigs {
-        val keystore = System.getenv("DSH_KEYSTORE")
-        if (!keystore.isNullOrBlank() && file(keystore).exists()) {
+    // Release signing: DSH_KEYSTORE / DSH_KEYSTORE_PASSWORD / DSH_KEY_ALIAS / DSH_KEY_PASSWORD
+    // (see docs/DEPLOYMENT.md). Without them, `assembleRelease` is refused instead of quietly
+    // producing an unsigned or debug-signed APK that installed copies would reject as an update.
+    val releaseKeystore = System.getenv("DSH_KEYSTORE")?.takeIf { it.isNotBlank() }
+    val releaseSigned = releaseKeystore != null && file(releaseKeystore).exists()
+    if (releaseSigned) {
+        signingConfigs {
             create("release") {
-                storeFile = file(keystore)
+                storeFile = file(releaseKeystore!!)
                 storePassword = System.getenv("DSH_KEYSTORE_PASSWORD")
                 keyAlias = System.getenv("DSH_KEY_ALIAS")
                 keyPassword = System.getenv("DSH_KEY_PASSWORD")
             }
-            buildTypes.getByName("release") {
-                signingConfig = signingConfigs.getByName("release")
-            }
+        }
+        buildTypes.getByName("release") { signingConfig = signingConfigs.getByName("release") }
+    }
+    tasks.configureEach {
+        if (name == "assembleRelease" || name == "bundleRelease") {
+            doFirst { check(releaseSigned) { "Release signing is not configured: set DSH_KEYSTORE and friends (docs/DEPLOYMENT.md)." } }
         }
     }
-
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17

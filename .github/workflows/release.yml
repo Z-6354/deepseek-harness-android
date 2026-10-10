@@ -24,13 +24,12 @@ jobs:
           packages: platform-tools
       - uses: gradle/actions/setup-gradle@v4
 
-      - name: Restore signing keystore (optional)
+      - name: Restore signing keystore
         env:
           KEYSTORE_B64: ${{ secrets.RELEASE_KEYSTORE }}
         run: |
-          if [ -n "$KEYSTORE_B64" ]; then
-            echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/release.keystore"
-          fi
+          if [ -z "$KEYSTORE_B64" ]; then echo "RELEASE_KEYSTORE secret is not set" >&2; exit 1; fi
+          echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/release.keystore"
 
       # The tag is the single source of the shipped version; see app/build.gradle.kts.
       - name: Derive version from tag
