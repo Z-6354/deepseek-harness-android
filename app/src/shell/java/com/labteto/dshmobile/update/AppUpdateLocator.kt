@@ -9,10 +9,10 @@ import kotlin.coroutines.cancellation.CancellationException
  * is still tried; previously only an HTTP-level null fell through to the backup.
  */
 class AppUpdateLocator internal constructor(private val sources: List<suspend () -> AppUpdateOffer?>) {
+    // GitHub holds source only: APKs are distributed from the operator's own server, never from Releases.
     constructor(
         hosted: HostedAppUpdateSource = HostedAppUpdateSource(),
-        github: GitHubAppUpdateSource = GitHubAppUpdateSource(),
-    ) : this(listOf({ hosted.latest() }, { github.latest() }))
+    ) : this(listOf({ hosted.latest() }))
 
     suspend fun latest(): AppUpdateOffer? {
         for (source in sources) {

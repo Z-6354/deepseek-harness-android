@@ -34,6 +34,7 @@ class BrowserRuntime(
         data object Restored : Event
         data object CompatibilityUnavailable : Event
         data object BlockedNavigation : Event
+        data object PrivateStorageReset : Event
     }
     sealed interface PlatformRequest {
         data class Bridge(val site: Site, val request: BridgeRequest, val lease: DocumentLease) : PlatformRequest
@@ -79,7 +80,8 @@ class BrowserRuntime(
         WebView.setWebContentsDebuggingEnabled(BuildConfig.DEBUG)
         val web = WebView(context)
         view = web
-        privateFiles = PrivateFileService(context, web, target, ::lease, { owns(it) }, ::reply)
+        privateFiles = PrivateFileService(context, web, target, ::lease, { owns(it) }, ::reply,
+            onStorageReset = { android.os.Handler(android.os.Looper.getMainLooper()).post { if (view === web) onEvent(Event.PrivateStorageReset) } })
         val privateService = privateFiles
         fun isReservedPrivateUrl(url: String): Boolean = privateService?.isReservedPath(url) ?: runCatching {
             val parsed = Uri.parse(url)

@@ -32,6 +32,8 @@ class PrivateFileService(
     private val ownsLease: (DocumentLease) -> Boolean,
     private val reply: (DocumentLease, String) -> Unit,
     private val elapsedMs: () -> Long = { android.os.SystemClock.elapsedRealtime() },
+    /** Called (from the IO thread) once after a corrupt fence was repaired and the cache was emptied. */
+    private val onStorageReset: () -> Unit = {},
 ) : Closeable {
     private data class ReadToken(
         val id: String, val partition: String, val key: String, val snapshot: PrivateFileStore.Snapshot,
@@ -47,6 +49,8 @@ class PrivateFileService(
     private fun getOrInitializeStore(): PrivateFileStore = cachedStore ?: synchronized(storeLock) {
         cachedStore ?: try {
             PrivateFileStore(File(context.noBackupFilesDir, "private-cache-v1"), site.owner).also {
+                // A corrupt fence used to disable private files forever; the cache is re-fetchable, so rebuild it.
+                if (!it.isAvailable() && it.repairCorruptFence()) runCatching { onStorageReset() }
                 it.recoverOrphanWrites()
                 storageUnavailable = !it.isAvailable()
                 cachedStore = it

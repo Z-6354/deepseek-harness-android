@@ -14,7 +14,6 @@
 <p align="center">
   <a href="https://dsh.wannian.fun/"><img alt="Site" src="https://img.shields.io/badge/site-dsh.wannian.fun-4176E6?style=flat-square"></a>
   <a href="https://github.com/Z-6354/deepseek-harness-android"><img alt="GitHub" src="https://img.shields.io/badge/github-Z--6354%2Fdeepseek-harness-android-181717?style=flat-square"></a>
-  <a href="https://github.com/Z-6354/deepseek-harness-android/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/Z-6354/deepseek-harness-android?style=flat-square"></a>
   <img alt="Android 9.0+" src="https://img.shields.io/badge/Android-9.0%2B-3DDC84?style=flat-square">
   <a href="LICENSE"><img alt="MIT" src="https://img.shields.io/badge/license-MIT-blue?style=flat-square"></a>
 </p>

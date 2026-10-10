@@ -85,14 +85,25 @@
 |---|---|---|---|---|
 | L-01 | **P1** ✅已修 | `dsh-local-hanaccount` `ip.js`、`store.js`、`api.js`、`index.js`、`initial-password.js`、`scripts/set-password.mjs` | **回环代理失败即放行**。策略（你已确认）：默认关闭回环免登录（`loopbackOperator:true` 可恢复）；回环连接带任何转发头却取不到可信地址时按"未解析代理客户端"处理；XFF 取最右一跳并与 `X-Real-IP` 互相校验。**首次设置**（参照 code-server、Portainer，你选了"只做预设密码脚本和环境变量"）：`auth/setup` 一律 403 `setup_disabled`，浏览器不再能设置密码；初始密码来自环境变量 `DSH_HANACCOUNT_PASSWORD_FILE`/`DSH_HANACCOUNT_PASSWORD`（仅在无密码时生效、从不覆盖）或停机后运行 `scripts/set-password.mjs`。登录页在无密码时只显示说明 | — |
 | L-02 | **P1** ✅已修 | 同上 `api.js`、`store.js`、`password.js`、`login-guard.js` | 策略（你已确认）：只支持 IPv4。远端 IPv6 一律 403；`state.lockouts` 上限 2048 且最后淘汰锁定中的条目；**新增**全局失败预算（60 秒内 30 次失败进入 60 秒冷却，持续则翻倍至 15 分钟，平静一小时复位，白名单地址不计入也不受限）；密码校验改异步 scrypt，并发 2、排队 8，超出返回 429 `login_busy` 且不计入失败；并发尝试在校验前同步占位计数，不会因异步而突破锁定。**仍未做**：全局阈值是经验值（30/60s），没有真实流量校准；冷却是进程内存状态，重启归零 | — |
-| L-03 | P2 | `sync-owner.js:27-32,185-192` | **缓存无淘汰且每次 open 上送全部哈希**：`maxSessionEvents/maxSessionBytes` 已定义但从未使用，`touchedAt` 只写不读；20 万事件的会话每次打开约 15 MB+ 请求，超过传输上限后该会话永久同步失败 | 需要协议改动（区间/Merkle 摘要或分级 reset） |
-| L-04 | P2 | `PrivateFileService.kt:81-90` 等 | **锁内磁盘 I/O 可阻塞 UI 线程**：`bindDocument` 在 UI 线程持服务锁调用 `revokeAll`，而后者会等待持注册表锁做 `FileInputStream.read` 的读者，读者又等持全局锁做哈希/fsync 的写者。32 MiB `commitWrite` 期间导航会卡数秒 | 涉及锁层次重构，需要真机复现与压测 |
-| L-05 | P2 | `MainActivity:821,827,699`、`PlatformCredentialStore` | Keystore 与 `commit()` 在主线程；HyperOS/三星 TEE 上可达数百毫秒。回包需回到主线程并保持租约校验 | 改动覆盖桥接回复路径，需要真机验证 |
-| L-06 | P2 | `MainActivity:201-216,160,182` | 图片保存：对话框写 25 MiB，blob 路径实际只有 8 MiB；同步 XHR 加逐字符拼接再把约 11 MB base64 过 `evaluateJavascript`；跨源 https 图长按提示自相矛盾 | 需要重写传输方式（分块） |
-| L-07 | P3 | `PrivateFileStore.kt:246` | 围栏文件损坏后私有文件被永久禁用，无自愈路径 | 属设计问题 |
-| L-08 | P3 | 发布 | 目前没有任何 Release/tag，Actions 密钥为空（无签名密钥），`remote-latest.json` 仍是 `0.0.0` 占位；`isMinifyEnabled=false` | 涉及签名密钥与发布流程，需要你来配置 |
-| L-09 | P3 | 真机验证 | HyperOS 方案"已完成"项仍缺：K80 冷启动烟测×5、缺失 API 夹具真机测试、phase3 对比实验。本次完全没有设备 | 需要设备 |
+| L-03 | P2 ⏸已核实,暂不改 | `sync-owner.js:27-32,185-192` | **缓存无淘汰且每次 open 上送全部哈希**：`maxSessionEvents/maxSessionBytes` 已定义但从未使用，`touchedAt` 只写不读；20 万事件的会话每次打开约 15 MB+ 请求，超过传输上限后该会话永久同步失败 | 需要协议改动（区间/Merkle 摘要或分级 reset） |
+| L-04 | P2 ⏸推迟 | `PrivateFileService.kt:81-90` 等 | **锁内磁盘 I/O 可阻塞 UI 线程**：`bindDocument` 在 UI 线程持服务锁调用 `revokeAll`，而后者会等待持注册表锁做 `FileInputStream.read` 的读者，读者又等持全局锁做哈希/fsync 的写者。32 MiB `commitWrite` 期间导航会卡数秒 | 涉及锁层次重构，需要真机复现与压测 |
+| L-05 | P2 ✅已修(仅 JVM,未真机) | `MainActivity:821,827,699`、`PlatformCredentialStore` | Keystore 与 `commit()` 在主线程；HyperOS/三星 TEE 上可达数百毫秒。回包需回到主线程并保持租约校验 | 改动覆盖桥接回复路径，需要真机验证 |
+| L-06 | P2 ✅已修(仅 JVM,未真机) | `MainActivity:201-216,160,182` | 图片保存：对话框写 25 MiB，blob 路径实际只有 8 MiB；同步 XHR 加逐字符拼接再把约 11 MB base64 过 `evaluateJavascript`；跨源 https 图长按提示自相矛盾 | 需要重写传输方式（分块） |
+| L-07 | P3 ✅已修(仅 JVM,未真机) | `PrivateFileStore.kt:246` | 围栏文件损坏后私有文件被永久禁用，无自愈路径 | 属设计问题 |
+| L-08 | P3 🔶部分完成 | 发布 | 目前没有任何 Release/tag，Actions 密钥为空（无签名密钥），`remote-latest.json` 仍是 `0.0.0` 占位；`isMinifyEnabled=false` | 涉及签名密钥与发布流程，需要你来配置 |
+| L-09 | P3 ⏸后续 | 真机验证 | HyperOS 方案"已完成"项仍缺：K80 冷启动烟测×5、缺失 API 夹具真机测试、phase3 对比实验。本次完全没有设备 | 需要设备 |
 
+### L-03..L-09 处理记录（2026-10-10）
+
+- **L-03**：已有的 `dsh-session-cache-sync` 确实在浏览器 IndexedDB 做本地缓存，主机侧只存哈希。但 `cacheManifest` 读取整个缓存会话（`readSession` 默认 0..MAX）并把全部哈希放进 `open` 请求；只有展示窗口（`readSession` 的 `visibleFrom`）和主机 `follow()` 的 `maxMessages/turnWindow` 是分窗口的。所以"只发送当前加载的历史"只对展示和主机快照成立，对哈希清单不成立。`maxSessionEvents/maxSessionBytes` 确认未被读取。**未验证**：请求体上限在 harness 传输层，插件内没有对应检查，"超限后永久失败"没有实测。未改代码。
+- **L-04**：只读了锁链（`bindDocument` → `revokeAll` 等读者 → 读者在注册表锁内做文件读），等待是有意的，用来保证撤销后没有在途读取。写者持全局锁做哈希/fsync 的第三层未实测。需要真机复现后再改。
+- **L-05**：`PlatformCredentialStore` 的 read/save/clear 改为经 `SerialIo` 单线程执行，结果回主线程；`reply` 仍校验文档租约，过期页面的回复被丢弃。退出登录改为异步清密码，成功后才继续清理。
+- **L-06**：采用分块拉取：`data:` 在原生解码，`blob:` 由页面异步 `fetch` 后按 512 KiB 切片拉取，去掉同步 XHR 和整图 base64。上限统一为 `SafeDownload.MAX_BYTES`（25 MiB），对话框文案同步，跨源图片提示改为明确原因。
+- **L-07**：围栏损坏（含伪造 `epoch=invalid`）时 `repairCorruptFence()` 清空缓存并换新 epoch，界面提示"本地图片缓存已损坏，已自动清空并重建"。带清理 nonce 的围栏不会被它改动。
+- **L-08**：`release.yml` 改为只构建、校验并上传 7 天的私有 artifact，不再创建 GitHub Release，权限降为 `contents: read`；更新检查只走自托管清单（去掉 GitHub 备援源）；文档同步。**未完成**：见下。
+  - 线上 `dsha-0.12.11.apk` 用的是 **Android Debug 签名**（与本机 `~/.android/debug.keystore` 指纹一致）。已装机的包只接受同签名的更新，CI 新建密钥签出来的包无法覆盖安装。需要你决定沿用该密钥还是换新密钥（换意味着用户要卸载重装）。
+  - 域名按 `dsh.wannian.fun` 处理（你写的 `fun1` 疑似笔误，请确认）。`DSHA_UPDATE_HOST` 和服务器凭据需要你在本机配置，不入库。
+- **L-09**：后续。
 ## D. 同时完成的仓库收尾（GitHub 侧）
 
 - 新仓库 `Z-6354/deepseek-harness-android`：公开、非 fork、MIT、默认分支 `main`；历史中服务器 IP、私钥、令牌、keystore 口令 0 命中（已对全部提交逐一 `git grep`）。

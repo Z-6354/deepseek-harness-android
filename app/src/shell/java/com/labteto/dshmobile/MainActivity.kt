@@ -42,6 +42,9 @@ import kotlin.coroutines.resume
 class MainActivity : AppCompatActivity() {
     private lateinit var repository: SiteRepository
     private lateinit var credentialStore: PlatformCredentialStore
+    // Keystore and SharedPreferences.commit() can take hundreds of ms on some TEEs: never on the UI thread.
+    private val credentialIo = SerialIo("credential-io") { runOnUiThread(it) }
+    private var clearingCredentials = false
     private lateinit var root: LinearLayout
     private lateinit var frame: FrameLayout
     private lateinit var status: TextView
@@ -159,7 +162,7 @@ class MainActivity : AppCompatActivity() {
     private fun offerSave(site: Site, url: String, contentDisposition: String?, mime: String?) {
         val request = DownloadRequest(runtime.lease(), site, url)
         val image = mime?.startsWith("image/") == true || url.startsWith("blob:", true) || url.startsWith("data:", true)
-        AlertDialog.Builder(this).setMessage(if (image) "保存此图片？" else "保存此文件？最大 25 MiB。仅浏览器可用的导出方式可能无法使用。")
+        AlertDialog.Builder(this).setMessage(if (image) "保存此图片？最大 25 MiB。" else "保存此文件？最大 25 MiB。仅浏览器可用的导出方式可能无法使用。")
             .setPositiveButton("保存") { _, _ ->
                 if (foreground() && valid(request.lease) && pendingDownload == null && !downloading) {
                     pendingDownload = request
@@ -179,10 +182,15 @@ class MainActivity : AppCompatActivity() {
             try {
                 lease.ensureActive(::ownsDownload)
                 contentResolver.openOutputStream(uri, "w")?.use { stream ->
-                    if (pending.url.startsWith("blob:", true) || pending.url.startsWith("data:", true)) {
-                        val bytes = readWebImageBytes(pending.url) ?: error("Image bytes unavailable")
-                        check(bytes.size <= 8 * 1024 * 1024) { "File exceeds 8 MiB" }
+                    if (pending.url.startsWith("data:", true)) {
+                        val bytes = WebImageTransfer.decodeDataUrl(pending.url, SafeDownload.MAX_BYTES)
                         lease.write(::ownsDownload) { stream.write(bytes); stream.flush() }
+                    } else if (pending.url.startsWith("blob:", true)) {
+                        WebImageTransfer.readBlob(
+                            eval = { script -> evaluateInDocument(pending.lease, script) }, url = pending.url, id = java.util.UUID.randomUUID().toString().replace("-", ""),
+                            maxBytes = SafeDownload.MAX_BYTES,
+                        ) { chunk -> lease.write(::ownsDownload) { stream.write(chunk) } }
+                        lease.write(::ownsDownload) { stream.flush() }
                     } else {
                         download.transfer(pending.site, pending.url,
                             cookie = { url -> lease.ensureActive(::ownsDownload); CookieManager.getInstance().getCookie(url) },
@@ -197,36 +205,15 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private suspend fun readWebImageBytes(url: String): ByteArray? {
+    /** Runs [script] in the document that owns [owner]; null when that document is gone or never answers. */
+    private suspend fun evaluateInDocument(owner: DocumentLease, script: String): String? {
         val web = browser ?: return null
-        val quoted = org.json.JSONObject.quote(url)
-        val script = """
-            (function(){
-              try {
-                var xhr = new XMLHttpRequest();
-                xhr.open('GET', $quoted, false);
-                xhr.overrideMimeType('text/plain; charset=x-user-defined');
-                xhr.send(null);
-                if (xhr.status !== 200 && xhr.status !== 0) return '';
-                var s = xhr.responseText || '';
-                if (s.length > 8388608) return '';
-                var out = '';
-                for (var i = 0; i < s.length; i++) out += String.fromCharCode(s.charCodeAt(i) & 255);
-                return btoa(out);
-              } catch (e) { return ''; }
-            })()
-        """.trimIndent()
-        val owner = runtime.lease()
-        val raw = awaitDocumentResult({ runtime.owns(owner) }) { done ->
+        return awaitDocumentResult({ runtime.owns(owner) }) { done ->
             web.post {
                 if (!runtime.owns(owner)) { done(null); return@post }
                 web.evaluateJavascript(script, done)
             }
         }
-        if (raw.isNullOrBlank() || raw == "null" || raw == "\"\"") return null
-        val b64 = org.json.JSONTokener(raw).nextValue() as? String ?: return null
-        if (b64.isBlank()) return null
-        return android.util.Base64.decode(b64, android.util.Base64.DEFAULT)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -703,10 +690,24 @@ class MainActivity : AppCompatActivity() {
 
     private fun beginSwitch(target: Site?) {
         if (BrowserEnvironment.isCleaning) { status.text = "正在清除浏览数据，请稍后再切换目标。"; return }
-        if (target == null && !credentialStore.clear()) {
-            status.text = "未能清除已保存的密码。本地退出尚未完成；请重试，或到系统设置中清除本应用存储。"
-            return
+        if (target != null) { continueSwitch(target); return }
+        if (clearingCredentials) return
+        // `loading` keeps every other site/logout action out while the Keystore work runs off-thread.
+        clearingCredentials = true; loading = true
+        status.text = "正在清除已保存的密码…"
+        credentialIo.submit({ credentialStore.clear() }) { result ->
+            clearingCredentials = false; loading = false
+            if (isDestroyed || isFinishing) return@submit // the password is already gone; the user can finish logout next launch
+            if (!result.getOrDefault(false)) {
+                status.text = "未能清除已保存的密码。本地退出尚未完成；请重试，或到系统设置中清除本应用存储。"
+                return@submit
+            }
+            continueSwitch(null)
         }
+    }
+
+    private fun continueSwitch(target: Site?) {
+        if (BrowserEnvironment.isCleaning) { status.text = "正在清除浏览数据，请稍后再切换目标。"; return }
         if (!BrowserEnvironment.canDelete()) {
             if (target == null) {
                 repository.blockForLocalLogout { destroyBrowser(); site = null }
@@ -781,6 +782,10 @@ class MainActivity : AppCompatActivity() {
             }
             BrowserRuntime.Event.CompatibilityUnavailable -> Toast.makeText(this, WebCompatibility.UNAVAILABLE, Toast.LENGTH_LONG).show()
             BrowserRuntime.Event.BlockedNavigation -> status.text = "已阻止打开该地址"
+            BrowserRuntime.Event.PrivateStorageReset -> {
+                status.text = "本地图片缓存已损坏，已自动清空并重建；图片会按需重新下载。"
+                Toast.makeText(this, status.text, Toast.LENGTH_LONG).show()
+            }
         }
         applyLaunchSurface()
     }
@@ -794,7 +799,9 @@ class MainActivity : AppCompatActivity() {
                 val allowed = NavigationPolicy.decide(request.site, request.url) == Navigation.INTERNAL ||
                     (request.mime?.startsWith("image/") == true && (request.url.startsWith("blob:", true) || request.url.startsWith("data:", true)))
                 if (allowed) offerSave(request.site, request.url, request.disposition, request.mime)
-                else status.text = "文件下载仅支持同源 HTTPS GET。图片可长按保存。"
+                else status.text = if (request.mime?.startsWith("image/") == true)
+                    "无法保存该图片：它来自其他网站。仅支持本站文件，以及页面内生成的图片。"
+                else "文件下载仅支持同源 HTTPS GET。"
             }
             is BrowserRuntime.PlatformRequest.FilePicker -> {
                 val callback = request.callback; val params = request.params
@@ -825,14 +832,19 @@ class MainActivity : AppCompatActivity() {
         when (request.type) {
             "readCredential" -> {
                 if (request.payload.isNotEmpty()) { reply(error = "invalid_payload"); return }
-                val password = credentialStore.read(target.origin)
-                reply(buildJsonObject { put("saved", password != null); if (password != null) put("password", password) })
+                // `reply` re-checks the document lease, so an answer for a replaced page is dropped.
+                credentialIo.submit({ credentialStore.read(target.origin) }) { result ->
+                    val password = result.getOrNull()
+                    reply(buildJsonObject { put("saved", password != null); if (password != null) put("password", password) })
+                }
             }
             "saveCredential" -> {
                 val password = BridgeProtocol.credentialPassword(request.payload)
                 if (password == null) { reply(error = "invalid_payload"); return }
-                if (credentialStore.save(target.origin, password)) reply(buildJsonObject { put("saved", true) })
-                else reply(error = "credential_storage_unavailable")
+                credentialIo.submit({ credentialStore.save(target.origin, password) }) { result ->
+                    if (result.getOrDefault(false)) reply(buildJsonObject { put("saved", true) })
+                    else reply(error = "credential_storage_unavailable")
+                }
             }
             "changeWebsite" -> {
                 if (siteConfirmation || loading || BrowserEnvironment.isCleaning || repository.cleanupPending) {
@@ -1016,6 +1028,7 @@ class MainActivity : AppCompatActivity() {
     override fun onDestroy() {
         dismissUpdateProgress()
         updateDownloadJob?.cancel()
+        credentialIo.close() // queued work (including a logout's credential clear) still finishes
         launchHandler.removeCallbacksAndMessages(null)
         BrowserEnvironment.detach(cleanupObserverKey)
         cleanupNonce = null

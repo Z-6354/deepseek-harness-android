@@ -54,7 +54,7 @@ ssh ubuntu@<SERVER_HOST> "sudo tee /var/www/dsha/update/latest.json >/dev/null" 
   "apkName": "dsha-${VERSION}.apk",
   "apkBytes": ${BYTES},
   "sha256": "${SHA}",
-  "releaseNotes": "见 GitHub Release 说明"
+  "releaseNotes": "见更新说明"
 }
 EOF
 ssh ubuntu@<SERVER_HOST> 'sudo chown www-data:www-data /var/www/dsha/update/latest.json'
@@ -65,7 +65,6 @@ ssh ubuntu@<SERVER_HOST> 'sudo chown www-data:www-data /var/www/dsha/update/late
 App 在加载阶段后台自动检查（无设置入口），有新版本则在页面揭罩后弹出可关闭对话框：
 
 1. `https://dsh.wannian.fun/dsha/update/latest.json`（主渠道，国内可达）
-2. `https://api.github.com/repos/Z-6354/deepseek-harness-android/releases/latest`（备份；国内可能被墙）
 
 安装前会校验 HTTPS、可选 SHA-256，以及 APK 签名与当前已装包一致。
 
@@ -93,7 +92,7 @@ git remote rename z6354 origin
 git remote remove upstream 2>/dev/null || true
 ```
 
-推送与发版以 **Z-6354/deepseek-harness-android** 为准。可选再打 GitHub Release 作备份，但手机更新以 `dsh.wannian.fun` 清单为准。
+GitHub 仓库只放源码，不发布 Release/APK；手机更新只走 `dsh.wannian.fun/dsha/update/latest.json`。
 
 ## 相关文档
 

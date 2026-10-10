@@ -53,6 +53,41 @@ class PrivateFileStoreTest {
         assertTrue(reopened.isAvailable())
     }
 
+    @Test fun corruptFenceIsRebuiltWithAFreshEpochAndEmptyData() {
+        val root = temp.newFolder("private")
+        var store = PrivateFileStore(root, "owner-A")
+        val partition = store.partitionId(PrivateFileStore.NAMESPACE, label)!!
+        publish(store, partition, key, "old".toByteArray())
+        val oldEpoch = store.currentEpoch()
+        File(root, "fence.properties").writeText("broken")
+        store = PrivateFileStore(root, "owner-A")
+        assertFalse(store.isAvailable())
+        assertTrue(store.repairCorruptFence())
+        assertTrue(store.isAvailable())
+        assertNotEquals(oldEpoch, store.currentEpoch())
+        assertNull("the cache was emptied", store.lookup(store.partitionId(PrivateFileStore.NAMESPACE, label)!!, key))
+        assertFalse("a healthy store is never repaired again", store.repairCorruptFence())
+    }
+
+    @Test fun forgedInvalidEpochIsAlsoRepaired() {
+        val root = temp.newFolder("private")
+        PrivateFileStore(root, "owner-A")
+        File(root, "fence.properties").writeText("epoch=invalid\nblocked=false\n")
+        val store = PrivateFileStore(root, "owner-A")
+        assertFalse(store.isAvailable())
+        assertTrue(store.repairCorruptFence())
+        assertTrue(store.isAvailable())
+    }
+
+    @Test fun repairNeverTouchesARunningCleanupFence() {
+        val root = temp.newFolder("private")
+        val store = PrivateFileStore(root, "owner-A")
+        store.beginCleanup("nonce-1")
+        assertFalse(store.repairCorruptFence())
+        assertFalse(store.isAvailable())
+        assertTrue(store.deleteForCleanup("nonce-1") && store.finishCleanup("nonce-1"))
+    }
+
     @Test fun invalidPartitionAndEntryLimitsAreRejected() {
         val store = PrivateFileStore(temp.newFolder("private"), "owner-A")
         assertNull(store.partitionId("unknown", label))

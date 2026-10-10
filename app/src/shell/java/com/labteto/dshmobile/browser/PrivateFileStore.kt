@@ -77,7 +77,7 @@ class PrivateFileStore(private val root: File, private val owner: String, privat
     /** Persist the fence before revoking in-memory operations. Safe to call again after a crash. */
     fun beginCleanup(nonce: String = UUID.randomUUID().toString()): String = synchronized(lock) {
         val old = readFence()
-        val next = if (old.blocked && old.epoch != "invalid" && old.cleanupNonce == nonce) old
+        val next = if (old.blocked && old.epoch != CORRUPT_EPOCH && old.cleanupNonce == nonce) old
         else Fence(UUID.randomUUID().toString(), true, nonce)
         writeFence(next)
         activeWrites.values.forEach { it.temp.delete() }
@@ -88,6 +88,24 @@ class PrivateFileStore(private val root: File, private val owner: String, privat
     /** The caller completes this only after WebStorage deletion succeeds. */
     fun completeCleanup(): Boolean = synchronized(lock) {
         deleteForCleanupLocked() && finishCleanupLocked()
+    }
+
+    /**
+     * Self-heal for an unreadable fence (torn write, disk corruption). Every entry here is a re-fetchable
+     * cache, so the safe recovery is to drop the data and start a fresh epoch.
+     *
+     * Only a *corrupt* fence is touched. A fence carrying a cleanup nonce belongs to a running cleanup
+     * transaction and is left alone, so this can never complete or cancel someone else's cleanup.
+     * Data goes first and the new fence last: a crash in between leaves the fence corrupt, and the next
+     * call simply repeats this. Returns true only when the store was actually rebuilt.
+     */
+    fun repairCorruptFence(): Boolean = synchronized(lock) {
+        if (readFence().epoch != CORRUPT_EPOCH) return@synchronized false
+        activeWrites.values.forEach { it.temp.delete() }
+        activeWrites.clear(); writersReserved.clear(); pins.clear()
+        val data = dataRoot()
+        if (data.exists() && !data.deleteRecursively()) return@synchronized false
+        runCatching { writeFence(Fence(UUID.randomUUID().toString(), false)); true }.getOrDefault(false)
     }
 
     fun deleteForCleanup(nonce: String? = null): Boolean = synchronized(lock) { deleteForCleanupLocked(nonce) }
@@ -243,11 +261,11 @@ class PrivateFileStore(private val root: File, private val owner: String, privat
     private fun fenceFile() = File(root, "fence.properties")
     private fun readFence(): Fence {
         val props = Properties()
-        if (!fenceFile().isFile) return Fence("invalid", true)
+        if (!fenceFile().isFile) return Fence(CORRUPT_EPOCH, true)
         val loaded = runCatching { fenceFile().inputStream().use(props::load); true }.getOrDefault(false)
         val epoch = props.getProperty("epoch")
         val blockedValue = props.getProperty("blocked")
-        if (!loaded || epoch.isNullOrBlank() || blockedValue !in setOf("true", "false")) return Fence("invalid", true)
+        if (!loaded || epoch.isNullOrBlank() || epoch == CORRUPT_EPOCH || blockedValue !in setOf("true", "false")) return Fence(CORRUPT_EPOCH, true)
         val cleanupNonce = props.getProperty("cleanupNonce")
         return Fence(epoch, blockedValue == "true", cleanupNonce)
     }
@@ -344,6 +362,8 @@ class PrivateFileStore(private val root: File, private val owner: String, privat
         const val MAX_FILES = 1024
         const val CHUNK_BYTES = 256 * 1024
         private const val DATA_DIR = "data"
+        /** Epoch reported for a missing/unreadable fence. A stored fence can never claim it (see readFence). */
+        private const val CORRUPT_EPOCH = "invalid"
         private val HEX64 = Regex("[a-f0-9]{64}")
         val MIME_TYPES = setOf("image/png", "image/jpeg", "image/webp", "image/gif", "application/octet-stream")
         private data class SharedState(
