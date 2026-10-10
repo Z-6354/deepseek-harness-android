@@ -27,9 +27,20 @@
 ## 测试
 
 - JVM 单测：`./gradlew :app:testDebugUnitTest`。
+- 开发中只跑相关的测试类，例如 `./gradlew :app:testDebugUnitTest --offline --tests '*PrivateFileStoreTest'`。全量单测加 lint 只在阶段收尾和提交前各跑一次。
 - `web-compat.js` 的 JS 测试**必须**带 `--expose-gc`（其中两个用例要手动触发 GC，缺少时会断言失败）：
   `node --expose-gc --test app/src/shellJsTest/web-compat.test.mjs`。CI 目前不跑这一项，改动 `web-compat.js` 前后请手动执行。
 - 设备测试在 `app/src/shellAndroidTest/`，需要真机或模拟器；涉及 HyperOS 的改动在 K80 上做 force-stop 冷启烟雾。
+
+### 测试节奏与耗时参考
+
+2026-10-09 至 10-10 的一次开发会话（17 轮，实际工作约 3.4 小时）里，模型生成约 80 分钟、命令执行约 50 分钟，其中 Gradle 约 21 分钟（26 次调用）。同一台机器（8 核、16 GB）上，改一个文件后重跑 `testDebugUnitTest`：冷启动约 35 秒，守护进程已热约 7 秒；打开 configuration cache 只再快约 2 秒，所以没有启用。全量单测加 lint 约 1 分钟。
+
+由此得到的做法：
+
+- 慢的是反复全量跑，不是单次构建。改动后先跑相关测试类，通过后再合并成一次全量。
+- 查看大文件时只读需要的行范围；一次读取整段源码会产生约 2 万字符的输出，占用上下文。
+- 从会话日志统计耗时时，上下文压缩会把旧的工具结果重写一遍，写入时间落在压缩那一刻，不能当作命令的真实耗时；按每个调用的第一条结果计算。
 
 ## 版本号
 
@@ -37,4 +48,6 @@
 
 ## 发布
 
-打 `v*` 标签后，Release 工作流构建 APK；配置了签名密钥则签名，否则为未签名包。
+GitHub 仓库只放源码，不发布 Release 或 APK。APK 由维护者用独立的发布密钥在本机签名，再通过 `scripts/publish-app-update.ps1` 发布到自托管更新渠道。没有配置 `DSH_KEYSTORE` 时 `assembleRelease` 会直接失败，不会产出未签名的包。密钥生成、环境变量和 CI 用法见 [DEPLOYMENT.md](DEPLOYMENT.md) 的 “Release signing”。
+
+打 `v*` 标签会触发 Release 工作流：它构建并签名 APK，保存为 7 天的私有 artifact，不创建 GitHub Release。
