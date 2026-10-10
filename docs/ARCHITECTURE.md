@@ -38,7 +38,7 @@ browser/
 ## 数据流
 
 1. 进程启动时设置 WebView 存储后缀；当前不在 Application 里预热 WebView（HyperOS 上与 Activity WebView 竞态会崩）。
-2. 加载当前站点 `entryUrl`（默认 `https://dsh.wannian.fun/`）；APP 不读写网页会话键。
+2. 加载当前站点 `entryUrl`（默认 `https://<SITE_HOST>/`）；APP 不读写网页会话键。
 3. 网页用官方接口与 `password-native-v1` 完成登录；Cookie 留在 WebView CookieManager。
 4. 网页可通过 `HanApp` 在前台、主框架、当前 generation 下读写本机加密密码、申请通知、展示通知、请求切站。
 5. 切站或本地退出：先落下清理事务，销毁 WebView，删除静态缓存；需要完整删除浏览数据时可能杀进程并要求从桌面重新打开。

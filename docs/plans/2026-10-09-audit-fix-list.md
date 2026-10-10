@@ -102,7 +102,7 @@
 - **L-07**：围栏损坏（含伪造 `epoch=invalid`）时 `repairCorruptFence()` 清空缓存并换新 epoch，界面提示"本地图片缓存已损坏，已自动清空并重建"。带清理 nonce 的围栏不会被它改动。
 - **L-08**：`release.yml` 改为只构建、校验并上传 7 天的私有 artifact，不再创建 GitHub Release，权限降为 `contents: read`；更新检查只走自托管清单（去掉 GitHub 备援源）；文档同步。**未完成**：见下。
   - 线上 `dsha-0.12.11.apk` 用的是 **Android Debug 签名**（与本机 `~/.android/debug.keystore` 指纹一致）。已装机的包只接受同签名的更新，CI 新建密钥签出来的包无法覆盖安装。需要你决定沿用该密钥还是换新密钥（换意味着用户要卸载重装）。
-  - 域名按 `dsh.wannian.fun` 处理（你写的 `fun1` 疑似笔误，请确认）。`DSHA_UPDATE_HOST` 和服务器凭据需要你在本机配置，不入库。
+  - 更新站点域名不在文档里写明，统一记作 `<SITE_HOST>`。`DSHA_UPDATE_HOST` 和服务器凭据需要你在本机配置，不入库。
 - **L-09**：后续。
 ## D. 同时完成的仓库收尾（GitHub 侧）
 

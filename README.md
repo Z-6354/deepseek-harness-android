@@ -12,7 +12,6 @@
 </p>
 
 <p align="center">
-  <a href="https://dsh.wannian.fun/"><img alt="Site" src="https://img.shields.io/badge/site-dsh.wannian.fun-4176E6?style=flat-square"></a>
   <a href="https://github.com/Z-6354/deepseek-harness-android"><img alt="GitHub" src="https://img.shields.io/badge/github-Z--6354%2Fdeepseek-harness-android-181717?style=flat-square"></a>
   <img alt="Android 9.0+" src="https://img.shields.io/badge/Android-9.0%2B-3DDC84?style=flat-square">
   <a href="LICENSE"><img alt="MIT" src="https://img.shields.io/badge/license-MIT-blue?style=flat-square"></a>
@@ -22,7 +21,7 @@
 
 当前 APK 只编译 `app/src/shell`：加载 HTTPS 站点、处理文件选择 / 下载 / 通知与私有文件桥。登录与业务协议在网页和服务器上的自制插件里完成。
 
-生产站点：[dsh.wannian.fun](https://dsh.wannian.fun/)。源码：[Z-6354/deepseek-harness-android](https://github.com/Z-6354/deepseek-harness-android)。**以本文件与 `docs/` 契约为准。**
+源码：[Z-6354/deepseek-harness-android](https://github.com/Z-6354/deepseek-harness-android)。**以本文件与 `docs/` 契约为准。**
 
 ---
 
@@ -42,12 +41,12 @@ Gradle 只构建 `:app`。三个插件是独立仓库检出，见 [`plugins/READ
 
 ## 当前行为
 
-- 默认打开 `https://dsh.wannian.fun/`；已保存的其它 HTTPS 站点会继续使用。
+- 默认站点见 `SiteRepository`；已保存的其它 HTTPS 站点会继续使用。
 - 在网页输入操作员密码登录（需服务器安装兼容的 `dsh-local-hanaccount`）。
 - 可选 `HanApp` 桥：仅当前精确 origin 的主框架可请求通知、本机加密密码与切站确认。
 - 同 origin HTTPS GET 下载（上限 25 MiB）；系统文件选择器上传；禁止混合内容与 `addJavascriptInterface`。
 - 本地退出清除浏览数据、Keystore 已存密码，以及静态资源磁盘缓存。
-- 加载罩显示当前版本号；启动后自动检查更新（优先 `https://dsh.wannian.fun/dsha/update/latest.json`），有新版本时弹出可关闭的系统对话框，确认后下载安装。
+- 加载罩显示当前版本号；启动后自动检查更新（优先 `https://<SITE_HOST>/dsha/update/latest.json`），有新版本时弹出可关闭的系统对话框，确认后下载安装。
 
 原生设置界面尚未接线；切站依赖网页桥 `changeWebsite`，或后续补上的设置项。
 
@@ -66,7 +65,7 @@ Gradle 只构建 `:app`。三个插件是独立仓库检出，见 [`plugins/READ
 
 ## 快速开始
 
-1. 按 [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) 在生产服务器上部署插件与 Nginx，站点为 `https://dsh.wannian.fun/`。
+1. 按 [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) 在生产服务器上部署插件与 Nginx，站点地址以你的部署为准（文档中记作 `https://<SITE_HOST>/`）。
 2. 构建并安装本仓 APK（见下）。首次启动进入默认站点，在登录页输入密码。
 3. 会话、模型、工作区都在网页里操作。
 

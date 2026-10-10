@@ -181,7 +181,7 @@ hanaccount：新增生成脚本后 `npm run build`、`npm test`、`node --check 
 # Deployment follow-up
 
 用户随后授权部署，实际发布与验证见 [DEPLOYMENT-2026-10-07](../archive/DEPLOYMENT-2026-10-07.md)。
-正确 dsh.wannian.fun 已更新至 hanaccount 2.4.2 / hanui 0.2.9，MuMu 新装 debug APK。
+正确 <SITE_HOST> 已更新至 hanaccount 2.4.2 / hanui 0.2.9，MuMu 新装 debug APK。
 实际 scope、目标冷恢复与热复用已验证；S6 的完整性能分布、连续 home-flash 和历史图片 bytes/RPC 仍未完成。
 三次实际冷启动 inputReady 为 20,049 / 20,800 / 18,689 ms，不能宣称性能达标。
 

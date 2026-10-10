@@ -15,7 +15,7 @@
 
 - 浏览器运行时：`BrowserRuntime` / `DocumentEpoch`，以 browserInstance + generation lease 判定存活；热恢复不 `loadUrl`，揭罩需要真实 WebView visual callback。
 - 私有文件桥：`PrivateFileService` / `PrivateFileStore` / `PrivateFileTransfer`，含原生读注册表与清理栅栏。
-- App 内更新：托管源（优先 `dsh.wannian.fun/dsha/update/latest.json`）与 GitHub 源，启动后检查，确认后下载安装。
+- App 内更新：托管源（优先 `<SITE_HOST>/dsha/update/latest.json`）与 GitHub 源，启动后检查，确认后下载安装。
 - 启动罩加载动画与版本号显示；`StartupTrace` / `RuntimeDiagnostics` 只观察不控制状态机。
 
 ### Fixed

@@ -7,18 +7,18 @@
 | 项 | 值 |
 |---|---|
 | GitHub | https://github.com/Z-6354/deepseek-harness-android |
-| 生产站点 | https://dsh.wannian.fun/ |
+| 生产站点 | https://<SITE_HOST>/ |
 | 服务器 | `ubuntu@<SERVER_HOST>`（SSH 密钥登录；真实主机不入库，见下方说明） |
 | DSH 数据目录 | `/home/ubuntu/.dsh/` |
 | App 更新目录 | `/var/www/dsha/update/`（Nginx `root /var/www` + URI `/dsha/...`） |
-| 部署文档镜像 | https://dsh.wannian.fun/dsha/docs/DEPLOYMENT.md |
-| 更新清单 URL | https://dsh.wannian.fun/dsha/update/latest.json |
+| 部署文档镜像 | https://<SITE_HOST>/dsha/docs/DEPLOYMENT.md |
+| 更新清单 URL | https://<SITE_HOST>/dsha/update/latest.json |
 
-`applicationId` 仍为 `com.labteto.dshmobile`（历史包名，改名会导致无法覆盖安装）。对外品牌与文档使用 **DSHA** / **wannian.fun**。
+`applicationId` 仍为 `com.labteto.dshmobile`（历史包名，改名会导致无法覆盖安装）。对外品牌与文档使用 **DSHA**。
 
 ## 服务器角色
 
-- Nginx：`dsh.wannian.fun` → TLS 终止后反代 `127.0.0.1:3080`（dsh-web）。
+- Nginx：`<SITE_HOST>` → TLS 终止后反代 `127.0.0.1:3080`（dsh-web）。
 - 静态更新：`location ^~ /dsha/` → 文件系统 `/var/www/dsha/`（不经 Harness 门禁）。
 - 自制插件运行时路径：`/home/ubuntu/.dsh/profiles/web/node_modules/dsh-local-hanaccount` 等。
 
@@ -50,7 +50,7 @@ ssh ubuntu@<SERVER_HOST> "sudo tee /var/www/dsha/update/latest.json >/dev/null" 
 {
   "versionName": "${VERSION}",
   "versionCode": $(python -c "v='${VERSION}'.split('.'); print(int(v[0])*10000+int(v[1])*100+int(v[2]))"),
-  "apkUrl": "https://dsh.wannian.fun/dsha/update/dsha-${VERSION}.apk",
+  "apkUrl": "https://<SITE_HOST>/dsha/update/dsha-${VERSION}.apk",
   "apkName": "dsha-${VERSION}.apk",
   "apkBytes": ${BYTES},
   "sha256": "${SHA}",
@@ -64,7 +64,7 @@ ssh ubuntu@<SERVER_HOST> 'sudo chown www-data:www-data /var/www/dsha/update/late
 
 App 在加载阶段后台自动检查（无设置入口），有新版本则在页面揭罩后弹出可关闭对话框：
 
-1. `https://dsh.wannian.fun/dsha/update/latest.json`（主渠道，国内可达）
+1. `https://<SITE_HOST>/dsha/update/latest.json`（主渠道，国内可达）
 
 安装前会校验 HTTPS、可选 SHA-256，以及 APK 签名与当前已装包一致。
 
@@ -108,7 +108,7 @@ git remote rename z6354 origin
 git remote remove upstream 2>/dev/null || true
 ```
 
-GitHub 仓库只放源码，不发布 Release/APK；手机更新只走 `dsh.wannian.fun/dsha/update/latest.json`。
+GitHub 仓库只放源码，不发布 Release/APK；手机更新只走 `<SITE_HOST>/dsha/update/latest.json`。
 
 ## 相关文档
 

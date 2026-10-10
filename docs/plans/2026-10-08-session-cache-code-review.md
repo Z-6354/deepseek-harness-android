@@ -132,7 +132,7 @@ Origin 检查的事实依据是精确官方 fence 与调用链；现有新 endpo
 
 ## 用户授权部署后的独立审核（部署证据待核）
 
-部署执行者为同一 Luna；Sol 仅检查配置、具体新差异及证据。目标固定为 生产服务器 / dsh.wannian.fun 与 MuMu com.labteto.dshmobile.debug 覆盖安装，不清应用数据。保留 hanui，更新 hanaccount 与新增插件，官方源码与 published factory 不改。
+部署执行者为同一 Luna；Sol 仅检查配置、具体新差异及证据。目标固定为 生产服务器 / <SITE_HOST> 与 MuMu com.labteto.dshmobile.debug 覆盖安装，不清应用数据。保留 hanui，更新 hanaccount 与新增插件，官方源码与 published factory 不改。
 
 旧 `artifacts/plugin-stage-a-rollout-20261007/rollout.py` 的健康标准仅为 auth_ready、匿名保护拒绝与登录页，且备份只有旧两插件/认证数据/nginx，不足以证明本次缓存部署成立。已向 Luna 明确：本轮还需 active profile/cordis/lock 与原 standalone disabled 配置备份，回滚同时恢复原 owner composition 和包引用；认证数据不盲目覆盖部署后的登录/撤权事实。
 
@@ -249,7 +249,7 @@ MuMu debug的一次authMe200false、rows0、无bookmark且无login form，与用
 
 | 部署门槛项 | 实网结果 |
 | --- | --- |
-| Client 装配 | `__DSH_BOOT__` 含唯一启用 `dsh-session-cache-sync`；batch 拉取其 `client.js`；无独立 session-controller Client 行；origin=`https://dsh.wannian.fun/` |
+| Client 装配 | `__DSH_BOOT__` 含唯一启用 `dsh-session-cache-sync`；batch 拉取其 `client.js`；无独立 session-controller Client 行；origin=`https://<SITE_HOST>/` |
 | 真缓存 | IDB v4：两会话 + 214 records；A `coverage[[0,209]]` cursor/token；B `coverage[[0,3]]`；同 scope partition |
 | A→B→A | `PASS_ABA_ZERO_HISTORY_WS`：回 A 仅 `opening`+`caught-up`，历史 body=0，UI 143 slots 恢复 |
 | warm 无变更 | `PASS_WARM_ZERO_HISTORY_WS`（force-stop 前后各一次） |

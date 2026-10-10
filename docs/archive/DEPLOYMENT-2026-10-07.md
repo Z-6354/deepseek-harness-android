@@ -2,7 +2,7 @@
 
 ## Deployed target
 
-The APP's origin is `https://dsh.wannian.fun/`, served by the Ubuntu host
+The APP's origin is `https://<SITE_HOST>/`, served by the Ubuntu host
 the production server. Its installed official DSH is `0.2.1-alpha.1`. The actual
 WebServer/Connection interfaces and compiled UiWorkspaceService were copied into
 an isolated contract snapshot and probed before deployment. The custom backend

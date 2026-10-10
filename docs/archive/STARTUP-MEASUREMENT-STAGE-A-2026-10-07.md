@@ -1,6 +1,6 @@
 # A 阶段部署后启动实测
 
-2026-10-07，Asia/Shanghai。MuMu `127.0.0.1:16384`、WebView 110.0.5481.154.1，连接正式站点 `https://dsh.wannian.fun`。本次只测量，没有修改 App、插件或服务器。
+2026-10-07，Asia/Shanghai。MuMu `127.0.0.1:16384`、WebView 110.0.5481.154.1，连接正式站点 `https://<SITE_HOST>`。本次只测量，没有修改 App、插件或服务器。
 
 已回读已安装 APK：`com.labteto.dshmobile.debug` / 0.12.2，SHA256 `25EFCFDB9B51D7510FA1F73C132522D9E4C69091B635966E37711FB198208889`，与已验证 A 阶段 APK 一致。服务器两个插件为本次更新后的构建。
 

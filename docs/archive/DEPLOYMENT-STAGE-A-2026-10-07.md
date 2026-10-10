@@ -5,7 +5,7 @@
 ## 已交付
 
 - MuMu `127.0.0.1:16384` 覆盖安装 `com.labteto.dshmobile.debug`，版本 0.12.2；未卸载或清除应用数据。回读已安装 base.apk 的 SHA256 为 `25EFCFDB9B51D7510FA1F73C132522D9E4C69091B635966E37711FB198208889`，与本地通过验证的 A 阶段 APK 相同。未给用户实体手机安装，也不是 release 签名升级。
-- 生产服务器 / `https://dsh.wannian.fun` 更新 hanaccount 2.4.2 与 hanui 0.2.9 的本轮源码包，保留已有 symlink、配置和认证数据；没有版本 bump、提交、发布或修改官方 DSH 核心。
+- 生产服务器 / `https://<SITE_HOST>` 更新 hanaccount 2.4.2 与 hanui 0.2.9 的本轮源码包，保留已有 symlink、配置和认证数据；没有版本 bump、提交、发布或修改官方 DSH 核心。
 - hanaccount 已安装 client SHA256：`9e6861a9e462e81ff0fdc93c0a5817625634f4d2b1890eee0b5027b169a921fa`。
 - hanui 已安装 client SHA256：`e636248fd59e05f1b83f5f3c380bd694fe19b24f28df5e9cf9ecf4e6a6c858c9`。
 

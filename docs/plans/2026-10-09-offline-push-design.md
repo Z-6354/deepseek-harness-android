@@ -78,7 +78,7 @@ flowchart LR
 
 | 事实 | 所有者 | 禁止 |
 |---|---|---|
-| 是否该推、推哪类 | **自有推送服务**（新模块，建议挂在 `dsh.wannian.fun` 旁路，经 hanaccount 鉴权） | App / hanui 在杀进程后「猜」 |
+| 是否该推、推哪类 | **自有推送服务**（新模块，建议挂在 `<SITE_HOST>` 旁路，经 hanaccount 鉴权） | App / hanui 在杀进程后「猜」 |
 | 设备 push token | App 注册 → 服务端存 | 网页任意读 token |
 | 通知文案与敏感度策略 | 服务端策略 + 产品默认 | 推送体携带消息全文（默认） |
 | 点开后导航 | App `NavigationPolicy` + 现有 notification 意图模型 | 打开任意外部 URL |
